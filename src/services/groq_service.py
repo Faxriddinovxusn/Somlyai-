@@ -7,87 +7,216 @@ Features:
 - Transaction parsing with enhanced 7-step analysis
 - Whisper audio transcription
 - Name extraction from voice
+- Comprehensive error classification for user-friendly messages
 """
 
 import json
 import logging
 import asyncio
+import time
+import aiohttp
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
+from dataclasses import dataclass
 from groq import AsyncGroq, APIStatusError, APITimeoutError, APIConnectionError
-from src.config import GROQ_API_KEYS, GROQ_MODEL
+from src.config import GROQ_API_KEYS, GROQ_MODEL, ADMIN_ID, BOT_TOKEN
 from src.categories import get_all_category_names_for_ai
+from src.services.i18n import t
+from src.services.error_handler import (
+    log_error, ErrorType
+)
 
 logger = logging.getLogger(__name__)
+
+# Groq request limits per user: {user_id: [ts1, ts2, ...]}
+groq_user_requests = {}
+GROQ_USER_LIMIT_1M = 20
+
+def check_groq_limit(user_id: int) -> bool:
+    """Returns True if allowed, False if exceeded limit."""
+    if not user_id:
+        return True
+    now = time.time()
+    if user_id not in groq_user_requests:
+        groq_user_requests[user_id] = []
+    
+    # Clean old requests (> 60s)
+    groq_user_requests[user_id] = [ts for ts in groq_user_requests[user_id] if now - ts <= 60]
+    
+    if len(groq_user_requests[user_id]) >= GROQ_USER_LIMIT_1M:
+        return False
+        
+    groq_user_requests[user_id].append(now)
+    return True
+
+
+class GroqQueueError(Exception):
+    """Raised when all API keys are exhausted or cooling, and request must be queued."""
+    pass
+
+
+class GroqServerError(Exception):
+    """Groq returned 500+ server error."""
+    pass
+
+
+@dataclass
+class KeyStats:
+    key: str
+    index: int
+    client: AsyncGroq
+    status: str = "active" # "active", "cooling", "exhausted"
+    requests_count: int = 0
+    last_error_time: float = 0.0
+    connection_errors: int = 0
 
 
 class GroqService:
     def __init__(self):
-        self.keys = GROQ_API_KEYS
-        self.current_key_index = 0
-        self.clients = [AsyncGroq(api_key=key) for key in self.keys]
+        self.keys_stats = []
+        for i, key in enumerate(GROQ_API_KEYS):
+            self.keys_stats.append(KeyStats(
+                key=key, 
+                index=i, 
+                client=AsyncGroq(api_key=key)
+            ))
 
-    def get_client(self):
-        return self.clients[self.current_key_index]
+    async def alert_admin(self, message: str):
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            async with aiohttp.ClientSession() as session:
+                await session.post(url, json={"chat_id": ADMIN_ID, "text": message})
+        except Exception as e:
+            logger.error(f"Failed to send admin alert: {e}")
 
-    def next_key(self):
-        self.current_key_index = (self.current_key_index + 1) % len(self.keys)
-        logger.warning(f"Switched to Groq API Key {self.current_key_index + 1}/{len(self.keys)}")
+    def get_best_key(self) -> KeyStats:
+        now = time.time()
+        # 1. Check if any cooling key can be reactivated
+        for ks in self.keys_stats:
+            if ks.status == "cooling":
+                if now - ks.last_error_time > 60:
+                    ks.status = "active"
+                    ks.connection_errors = 0
+                    logger.info(f"Groq API Key {ks.index+1} reactivated after cooling.")
 
-    async def chat_completion_with_retry(self, messages: List[Dict], max_retries: int = None, **kwargs) -> str:
-        if max_retries is None:
-            max_retries = len(self.keys) * 2
+        # 2. Find the active key with the minimum requests
+        active_keys = [ks for ks in self.keys_stats if ks.status == "active"]
+        if active_keys:
+            best_key = min(active_keys, key=lambda x: x.requests_count)
+            return best_key
+        
+        # 3. All keys are either cooling or exhausted
+        exhausted_keys = [ks for ks in self.keys_stats if ks.status == "exhausted"]
+        if len(exhausted_keys) == len(self.keys_stats):
+            raise GroqServerError("All API keys are permanently exhausted (401/Quota).")
+        
+        raise GroqQueueError("All keys are exhausted or cooling. Queueing required.")
 
+    async def chat_completion_with_retry(self, messages: List[Dict], **kwargs) -> str:
         attempts = 0
+        max_retries = len(self.keys_stats) * 2
+
         while attempts < max_retries:
-            client = self.get_client()
             try:
-                response = await client.chat.completions.create(
+                ks = self.get_best_key()
+            except GroqQueueError:
+                raise # immediately propagate so handler can queue
+
+            try:
+                response = await ks.client.chat.completions.create(
                     messages=messages,
                     model=GROQ_MODEL,
                     **kwargs
                 )
+                ks.requests_count += 1
+                ks.connection_errors = 0
                 return response.choices[0].message.content
-            except (APIStatusError, APITimeoutError, APIConnectionError) as e:
+            except APIStatusError as e:
+                status_code = getattr(e, 'status_code', 0)
                 error_str = str(e)
-                logger.error(f"Groq API Error (key {self.current_key_index+1}): {error_str}")
-                if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower() or "connection" in error_str.lower() or "403" in error_str:
-                    self.next_key()
-                    attempts += 1
-                    if attempts % len(self.keys) == 0:
-                        logger.warning("All keys exhausted. Waiting 30s before retry.")
-                        await asyncio.sleep(30)
+                logger.error(f"Groq API Error (key {ks.index+1}): {error_str}")
+
+                if status_code == 429 or "rate" in error_str.lower() or status_code == 403:
+                    ks.status = "cooling"
+                    ks.last_error_time = time.time()
+                    log_error(ErrorType.GROQ_RATE_LIMIT, f"Key {ks.index+1} rate limited (cooling)", exception=e)
+                elif status_code == 401 or "invalid_api_key" in error_str.lower():
+                    ks.status = "exhausted"
+                    ks.last_error_time = time.time()
+                    log_error(ErrorType.GROQ_RATE_LIMIT, f"Key {ks.index+1} invalid (401)", exception=e)
+                    asyncio.create_task(self.alert_admin(f"🚨 Groq API Key {ks.index+1} is INVALID (401 Unauthorized). It has been disabled."))
+                elif "quota" in error_str.lower():
+                    ks.status = "exhausted"
+                    ks.last_error_time = time.time()
+                    log_error(ErrorType.GROQ_RATE_LIMIT, f"Key {ks.index+1} quota exceeded", exception=e)
+                    asyncio.create_task(self.alert_admin(f"🚨 Groq API Key {ks.index+1} EXHAUSTED (Quota exceeded)."))
+                elif status_code >= 500:
+                    raise GroqServerError(f"Groq server error: {status_code}")
                 else:
                     raise e
-        raise Exception("Max retries reached for Groq API")
+            except (APITimeoutError, APIConnectionError) as e:
+                logger.error(f"Groq connection error (key {ks.index+1}): {str(e)}")
+                ks.connection_errors += 1
+                if ks.connection_errors >= 3:
+                    ks.status = "cooling"
+                    ks.last_error_time = time.time()
+                    logger.warning(f"Key {ks.index+1} connection errors maxed. Cooling down.")
+                
+            attempts += 1
+        
+        raise GroqQueueError("All API keys exhausted after max retries")
 
-    async def transcribe_audio_with_retry(self, file_path: str, max_retries: int = None) -> str:
-        if max_retries is None:
-            max_retries = len(self.keys) * 2
-
+    async def transcribe_audio_with_retry(self, file_path: str) -> str:
         attempts = 0
+        max_retries = len(self.keys_stats) * 2
+
         while attempts < max_retries:
-            client = self.get_client()
+            try:
+                ks = self.get_best_key()
+            except GroqQueueError:
+                raise
+
             try:
                 with open(file_path, "rb") as file:
-                    transcription = await client.audio.transcriptions.create(
+                    transcription = await ks.client.audio.transcriptions.create(
                         file=(file_path, file.read()),
                         model="whisper-large-v3-turbo",
                         response_format="json",
                         language="uz"
                     )
+                ks.requests_count += 1
+                ks.connection_errors = 0
                 return transcription.text
-            except (APIStatusError, APITimeoutError, APIConnectionError) as e:
+            except APIStatusError as e:
+                status_code = getattr(e, 'status_code', 0)
                 error_str = str(e)
-                logger.error(f"Groq Audio Error (key {self.current_key_index+1}): {error_str}")
-                if "429" in error_str or "quota" in error_str.lower() or "rate" in error_str.lower() or "connection" in error_str.lower() or "403" in error_str:
-                    self.next_key()
-                    attempts += 1
-                    if attempts % len(self.keys) == 0:
-                        await asyncio.sleep(30)
+                logger.error(f"Groq Audio Error (key {ks.index+1}): {error_str}")
+
+                if status_code == 429 or "rate" in error_str.lower() or status_code == 403:
+                    ks.status = "cooling"
+                    ks.last_error_time = time.time()
+                elif status_code == 401 or "invalid_api_key" in error_str.lower():
+                    ks.status = "exhausted"
+                    ks.last_error_time = time.time()
+                    asyncio.create_task(self.alert_admin(f"🚨 Groq API Key {ks.index+1} is INVALID (401 Unauthorized) for Audio. It has been disabled."))
+                elif "quota" in error_str.lower():
+                    ks.status = "exhausted"
+                    ks.last_error_time = time.time()
+                    asyncio.create_task(self.alert_admin(f"🚨 Groq API Key {ks.index+1} EXHAUSTED (Audio Quota)."))
+                elif status_code >= 500:
+                    raise GroqServerError(f"Groq server error: {status_code}")
                 else:
                     raise e
-        raise Exception("Max retries reached for Groq Audio API")
+            except (APITimeoutError, APIConnectionError) as e:
+                logger.error(f"Groq Audio connection error (key {ks.index+1}): {str(e)}")
+                ks.connection_errors += 1
+                if ks.connection_errors >= 3:
+                    ks.status = "cooling"
+                    ks.last_error_time = time.time()
+                
+            attempts += 1
+
+        raise GroqQueueError("All API keys exhausted for audio")
 
     # ═══════════════════════════════════════
     # ISMNI AJRATIB OLISH (ovozdan)
@@ -116,7 +245,21 @@ class GroqService:
     # ═══════════════════════════════════════
     # ASOSIY TRANZAKSIYA TAHLILI
     # ═══════════════════════════════════════
-    async def parse_transaction(self, text: str, current_date_str: str, language: str = "uz", custom_categories: list = None) -> Dict[str, Any]:
+    async def parse_transaction(self, text: str, current_date_str: str, language: str = "uz", custom_categories: list = None, user_id: int = 0, user_context: dict = None, recent_txs: str = "", habits: dict = None, all_balances: list = None, chat_history: list = None) -> Dict[str, Any]:
+        
+        # Rate limit check for user
+        if user_id and not check_groq_limit(user_id):
+            logger.warning(f"User {user_id} hit Groq API 20/min limit.")
+            return {"intent": "error", "error_key": "err_ai_busy"}
+
+        # ... (date calculations)
+        today = datetime.strptime(current_date_str, "%Y-%m-%d")
+        yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        tomorrow = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        current_time = datetime.now().strftime("%H:%M")
+
+        balances_text = ", ".join(all_balances) if all_balances else "So'm, Humo"
+
         # Kechagi va ertangi sanani hisoblash
         today = datetime.strptime(current_date_str, "%Y-%m-%d")
         yesterday = (today - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -129,128 +272,455 @@ class GroqService:
 
         # Kategoriyalar ro'yxatini tayyorlash
         categories_text = get_all_category_names_for_ai(custom_categories)
+        
+        context_text = ""
+        if user_context:
+            context_text = f"""
+FOYDALANUVCHI KONTEKSTI:
+- Ism: {user_context.get("full_name", "Noma'lum")}
+- Asosiy valyuta: {user_context.get('main_currency', 'UZS')}
+- Oylik limit: {user_context.get('monthly_limit', 0):,}
+- Bu oydagi xarajat: {user_context.get('monthly_expense', 0):,}
+- Mavjud balanslar: {balances_text}
+- Kategoriya odatlari: {recent_txs}
+"""
 
-        system_prompt = f"""Siz moliya botining AI tahlilchisisiz.
+        habits_text = ""
+        if habits:
+            habits_text = f"""
+FOYDALANUVCHI ODATLARI:
+- Asosiy balans/valyuta: {habits.get('default_currency') or 'UZS'}
+"""
+
+        # Dynamic Knowledge Base (QISM 8) — admin /teach orqali qo'shilgan bilimlar
+        knowledge_text = ""
+        try:
+            from src.database import get_active_knowledge_context
+            kb_context = await get_active_knowledge_context()
+            if kb_context:
+                knowledge_text = f"""
+QO'SHIMCHA BILIMLAR:
+{kb_context}
+Bu bilimlardan foydalanuvchini tushunish va to'g'ri javob berish uchun foydalaning.
+"""
+        except Exception as e:
+            logger.warning(f"Failed to fetch knowledge context: {e}")
+
+        system_prompt = f"""Sen Somly AI — O'zbekistonning birinchi bepul moliyaviy yordamchisan.
+@XusniddinWR tomonidan yaratilgan. Maqsad: O'zbek millatini moliyaviy savodxonlikka yetaklash.
+
 BUGUNGI SANA: {current_date_str}
-KECHAGI SANA: {yesterday}
-ERTANGI SANA: {tomorrow}
 HOZIRGI VAQT: {current_time}
+JAVOB TILI: {lang_name}
 
-JAVOB TILI: {lang_name} — Barcha javoblaringiz FAQAT {lang_name} tilida bo'lishi SHART!
+{context_text}
+{habits_text}
+{knowledge_text}
 
-═══ 1. INTENT (niyat) ═══
-Foydalanuvchining niyatini ANIQ aniqlang:
-- Agar moliyaviy ma'lumot yoki tranzaksiya bo'lsa → intent="finance"
-- Agar oddiy suhbat, savol, salomlashish, taklif yoki boshqa narsa bo'lsa → intent="chat"
-- MUHIM: "Bu bot pullikmi?", "Nima qila olasan?", "Salom", "Rahmat" — bular hammasi intent="chat"
-- MUHIM: "taksiga 15 ming", "oylik tushdi", "Jasurga qarz berdim" — bular intent="finance"
+═══════════════════════════════════════
+QISM 1 — NIYAT ANIQLASH (MAJBURIY)
+═══════════════════════════════════════
 
-═══ 2. TRANZAKSIYA TURLARI ═══
-KIRIM: "tushdi", "oldim" (ish kontekstida), "ishladim", "sotdim", "kirim", "maosh", "oylik"
-CHIQIM: "xarjladim", "ketdi", "to'ladim", "sarfladim", "sotib oldim", "berdim" (xizmat/mahsulot uchun), "ishlatdim"
+Har xabar kelganda AVVAL niyatni aniqla:
+1. MOLIYAVIY → kirim/chiqim/qarz kiritish (intent="finance")
+2. HISOBOT → statistika, balans so'rovi (intent="report")
+3. BOT HAQIDA SAVOL → o'zini tanishtirish (intent="bot_about")
+4. ODDIY SUHBAT → suhbat + yo'naltirish (intent="chat")
+5. MAXFIY SAVOL → himoya javobi (intent="secret")
+6. MOLIYAVIY MASLAHAT → maslahat berish (intent="advice")
+7. NEGA BEPUL SAVOLI → intent="chat", maxsus javob
 
-QARZ — direction ni to'g'ri aniqla:
-- "Jasurga 100 ming berdim" → direction: "bergan" (Jasur qaytarishi kerak)
-- "Jasurdan 100 ming oldim" → direction: "olgan" (Men qaytarishim kerak)
-- "Jasur menga 100 ming berishi kerak" → direction: "bergan"
-- "Men Jasurga 100 ming beraman" → direction: "olgan"
-MUHIM: Qarz HECH QACHON balansni o'zgartirmaydi!
+═══════════════════════════════════════
+QISM 2 — BOT O'ZINI TANISHTIRISH
+═══════════════════════════════════════
 
-═══ 3. MIQDOR ═══
-"ming" → ×1000, "mln"/"million" → ×1000000
-"yarim million" → 500000, "bir yarim million" → 1500000
+"Sen kimsan?", "o'zingni tanishtir", "salom", "isming nima" kabi so'rovlarda:
+Intent="bot_about" qaytar va "chat_response" ga quyidagini yoz:
 
-═══ 4. VALYUTA ═══
-"so'm"/"sum"/"UZS" → UZS, "dollar"/"$"/"USD" → USD
-"rubl"/"₽"/"RUB" → RUB, "tenge"/"₸"/"KZT" → KZT
-Aytilmagan → "UZS"
+"Assalomu alaykum! 🌙
 
-═══ 5. KO'P TRANZAKSIYA ═══
-Bitta xabarda bir nechta bo'lsa — BARCHASINI alohida ajrat.
+Men — Somly AI, sizning shaxsiy moliyaviy maslahatchingizman.
 
-═══ 6. SANA — BU JUDA MUHIM! ═══
-"bugun" → {current_date_str}
-"kecha" → {yesterday} (ANIQ kechagi sana!)
-"ertaga" → {tomorrow} (ANIQ ertangi sana!)
-"o'tgan haftada" → tegishli sana
-"10-may" → 2026-05-10
-Aytilmagan → {current_date_str}
-Har doim YYYY-MM-DD formatida.
+Maqsadim oddiy: har bir o'zbek oilasiga moliyaviy barqarorlik sari yo'l ko'rsatish. Daromad va xarajatlar ustidan nazorat — farovon hayotning asosi.
 
-═══ 7. ESLATMA VAQTI (reminder) ═══
-Agar foydalanuvchi "ertaga", "2 kundan keyin" yoki aniq sana aytsa VA bu qarz yoki kelajakdagi harakat bo'lsa:
-- "reminder_date" maydonini qo'shing (YYYY-MM-DD formatida)
-- "reminder_time" maydonini qo'shing (HH:MM formatida, 24 soatlik)
-- Agar soat aytilmagan bo'lsa → "{current_time}" ni qo'ying (hozirgi vaqt)
-- Agar soat aytilgan bo'lsa (masalan "kechki 6 da") → "18:00" qo'ying
+✅ Mutlaqo bepul
+✅ Ovoz va matn orqali ishlaydi
+✅ Sun'iy intellekt asosida
 
-Misol: "ertaga Sardorga 20 ming berishim kerak soat 6 da" → 
-  reminder_date: "{tomorrow}", reminder_time: "18:00"
-Misol: "ertaga Sardorga 20 ming berishim kerak" → 
-  reminder_date: "{tomorrow}", reminder_time: "{current_time}"
+Sizning hech qanday moliyaviy ma'lumotlaringiz kuzatilmaydi. Faqat xizmat qilamiz.
 
-═══ 8. KATEGORIYALAR ═══
-Kategoriyanlarni tanlashda quyidagi tartibga amal qiling:
-1. AVVAL shaxsiy (foydalanuvchi) kategoriyalarini tekshiring
-2. Keyin tizim kategoriyalaridan tanlang
-3. Hech biri mos kelmasa "📦 Boshqa xarajat" yoki "💸 Boshqa daromad" bering
+Bugungi daromad yoki xarajatingizni menga ishoning — birga nazorat qilamiz! 💪"
 
-{categories_text}
+═══════════════════════════════════════
+QISM 3 — MAXFIY SAVOLLARGA HIMOYA
+═══════════════════════════════════════
 
-Kategoriya formati: "emoji nom" (masalan: "🚕 Taksi")
+Quyidagi savollarga HECH QACHON to'liq javob berma:
+- "Qaysi AI ishlatilasan?", "GPT mi, Gemini mi?", "Hisobchi AI dan farqing nima?"
+- "Kodingni ko'rsatchi", "Backend nima bilan yozilgan?", "API keyingni ber"
 
-═══ JAVOB FORMATI ═══
+Bunday savollarga intent="secret" qaytar va "chat_response" ga:
+"Men faqat sizning Somly AI moliyaviy yordamchingizman 😊 Texnik savollar uchun @XusniddinWR ga murojaat qiling."
 
-Agar "chat":
-Foydalanuvchiga {lang_name} tilida QISQA, ANIQ va LO'NDA javob bering.
-MUHIM: Foydalanuvchining muomalasiga, kayfiyatiga va so'zlashuv uslubiga to'liq moslashing (segmentatsiyaga e'tibor bering). Agar u rasmiy yozsa, siz ham rasmiy javob bering. Agar samimiy, do'stona yoki emotsional yozsa, xuddi shunday do'stona va emotsional javob bering. AI o'zini o'zi tarbiyalashi va har bir foydalanuvchiga individual yondashishi shart.
-Ba'zan (har doim emas!) foydalanuvchi uslubiga mos kichik moliyaviy motivatsiya qo'shing.
+═══════════════════════════════════════
+QISM 4 — ODDIY SUHBAT + YO'NALTIRISH
+═══════════════════════════════════════
+
+User moliyaviy bo'lmagan savol bersa: Qisqa, samimiy javob ber. HAR DOIM oxirida moliyaviy yo'naltirish qo'sh.
+Intent="chat" qaytar va javobni "chat_response" ga yoz.
+
+MISOL: "Ronaldo kim?" → Cristiano Ronaldo haqida qisqa javob + "Siz ham daromadingizni to'g'ri boshqarib, katta maqsadlar sari qadam qo'ying! 💪 Bugungi kirim-chiqimingizni yozib borayapsizmi?"
+
+Yo'naltirish iboralaridan har doim birini qo'sh:
+- "Bugungi xarajatlaringizni kiritdingizmi?"
+- "Moliyaviy maqsadingiz bormi?"
+- "Daromadingizni kuzatyapsizmi?"
+- "Boshlaylikmi? 💰"
+
+"Nega bepul?" savoliga intent="chat" bilan maxsus javob:
+"Somly AI ning bepulligi — bu bizning millatga bo'lgan hurmatimiz belgisi. 🇺🇿 Moliyaviy savodxonlik — har bir insonning huquqi, imtiyoz emas. Biz kanallarimizga obuna bo'lgan foydalanuvchilar orqali rivojlanamiz. Bu — o'zaro hurmat asosidagi hamkorlik. 🤝"
+
+═══════════════════════════════════════
+QISM 5 — O'ZBEK QADRIYATLARI
+═══════════════════════════════════════
+
+Bot doim O'zbek milliy qadriyatlariga mos gapiradi:
+- "Assalomu alaykum" bilan boshlash (birinchi suhbatlarda)
+- Hurmat, kamtarlik uslubi
+- Oila, farovonlik, kelajak so'zlarini ishlatish
+- Yosh user (18-24): "siz", lekin qisqa va do'stona
+- Katta yoshli: "siz", rasmiy va hurmatli
+
+═══════════════════════════════════════
+QISM 6 — MOLIYAVIY MASLAHAT (ADVICE)
+═══════════════════════════════════════
+
+"Qanday tejasam bo'ladi?", "Qarz olsam yaxshimi?", "Mening moliyaviy holatim qanday?" kabi savollarga:
+Foydalanuvchining CONTEXT ma'lumotlariga qarab maslahat bering. Masalan: xarajati ko'p bo'lsa tejamkorlik, qarz haqida ijobiy/salbiy tahlil.
+CHEGARA: Tibbiyot, huquq, siyosat → "Bu savol mening doiramdan tashqarida. Moliyaviy savollar uchun bu yerdaman! 😊"
+Intent="advice" qaytar va javobni "chat_response" ga yoz.
+
+═══════════════════════════════════════
+QISM 7 — TRANZAKSIYA TAHLILI
+═══════════════════════════════════════
+
+Senga CHAT HISTORY (oldin yozishilgan xabarlar) yuboriladi. Ular orqali:
+
+1. YANGI TRANZAKSIYA: Moliyaviy xarajat/kirim/qarz → intent="finance" va transactions massiviga yoz.
+2. TARIXGA BOG'LIQ TUZATISH: "aslida", "yo'q", "xato", "o'zgartir" → intent="update", update_details ga yoz.
+3. O'CHIRISH: "Oxirgini o'chir" → intent="delete_request".
+4. ESLATMA / VAQT KONTEKSTI:
+   A) QARZ UCHUN: "Sardorga 10k berdim, ertaga olaman" → transactions ichidagi qarzga "reminder_date" va "reminder_time" qo'sh.
+   B) UMUMIY ESLATMA: "Shanba kuni uy haqi to'lash" → "reminders" massiviga qo'sh.
+   
+   VAQT HISOB-KITOBI:
+   - "hozir" → hozirgi vaqt
+   - "N daqiqadan/soatdan keyin" → hisoblab yoz
+   - "bugun kechqurun" → bugun 20:00
+   - "ertaga" → ertaga 09:00
+   - "shanba" → keyingi shanba 09:00
+   - "10-may" → 10 May 09:00
+
+QOLGAN QOIDALAR:
+- intent turlari: finance | chat | report | advice | bot_about | secret | unclear | reminder_action | update | delete_request
+- reminder_action: FAKATGINA foydalanuvchi kelgan eslatmaga javob bersa.
+- report_query: agar intent="report" bo'lsa, hisobot so'rovi yoziladi.
+- transactions massivida BARCHA amallar bo'lishi SHART. {categories_text}, {balances_text}.
+
+JSON FORMATI:
 {{
-  "intent": "chat",
-  "reply": "..."
-}}
-
-Agar "finance":
-{{
-  "intent": "finance",
-  "unclear": false,
-  "unclear_reason": "",
+  "intent": "finance|chat|report|advice|bot_about|secret|unclear|reminder_action|update|delete_request",
+  "report_query": "Foydalanuvchi so'rovi",
   "transactions": [
     {{
-      "type": "kirim|chiqim|qarz",
+      "transaction_type": "kirim|chiqim|qarz",
       "amount": 15000,
-      "currency": "UZS",
+      "currency": "UZS|USD|RUB|KZT",
+      "category": "kategoriya nomi",
+      "description": "izoh",
+      "balance_name": "Balans nomi",
       "date": "{current_date_str}",
-      "description": "Taksiga",
-      "category": "🚕 Transport",
-      "direction": "bergan",
-      "person": "Jasur",
-      "due_date": "nomalum",
-      "reminder_date": null,
-      "reminder_time": null
+      "affects_balance": true,
+      "debt_info": {{"direction": "bergan|olgan", "person": "...", "due_date": "..."}},
+      "reminder_date": "YYYY-MM-DD",
+      "reminder_time": "HH:MM"
     }}
-  ]
+  ],
+  "reminders": [{{ "type": "financial|general", "message": "...", "time": "YYYY-MM-DD HH:MM" }}],
+  "update_details": {{
+     "target_id": "TX_ID yoki DEBT_ID",
+     "new_values": {{"amount": 150000, "description": "yangi izoh..."}}
+  }},
+  "chat_response": "Botning javobi (chat, advice, bot_about, secret intent uchun MAJBURIY)",
+  "tip": "Maslahat yoki null"
 }}
 
-MUHIM: Faqat JSON, boshqa hech narsa yozma."""
+FAQAT JSON QAYTAR.
+"""
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text}
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        if chat_history:
+            messages.extend(chat_history)
+            
+        messages.append({"role": "user", "content": text})
 
-        response = await self.chat_completion_with_retry(
-            messages,
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=1500,
-        )
+        try:
+            response = await self.chat_completion_with_retry(
+                messages,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=3000,
+            )
+        except GroqQueueError:
+            # Let the caller handle the queueing
+            raise
+        except GroqServerError:
+            # Groq server down
+            return {"intent": "error", "error_key": "err_ai_down"}
+        except Exception as e:
+            log_error(ErrorType.GROQ_SERVER, f"Unexpected Groq error: {str(e)}", exception=e)
+            return {"intent": "error", "error_key": "err_ai_down"}
 
         try:
             return json.loads(response)
         except json.JSONDecodeError:
-            logger.error(f"Groq did not return valid JSON: {response}")
-            return {"intent": "chat", "reply": "Kechirasiz, tushunmadim. Qaytadan yozing."}
+            log_error(ErrorType.GROQ_JSON_PARSE, f"Invalid JSON from Groq: {response[:200]}")
+            return {"intent": "error", "error_key": "err_ai_json"}
+
+    # ═══════════════════════════════════════
+    # AI HISOBOT TAYYORLASH (QISM 6)
+    # ═══════════════════════════════════════
+    async def generate_report_response(self, query: str, context: dict, language: str = "uz", user_segment: dict = None) -> str:
+        """
+        Takes a report query and a full financial context to generate a smart chat report.
+        """
+        lang_map = {"uz": "O'zbek", "en": "English", "ru": "Русский"}
+        lang_name = lang_map.get(language, "O'zbek")
+        
+        # User segment for tone
+        seg = user_segment or {"age_group": "middle", "tone": "neutral", "mood": "neutral"}
+        
+        from src.database import get_active_knowledge_context
+        knowledge_context = await get_active_knowledge_context()
+        knowledge_text = ""
+        if knowledge_context:
+            knowledge_text = f"\nQO'SHIMCHA BILIMLAR:\n{knowledge_context}\n"
+        
+        system_prompt = f"""Sen Somly AI — O'zbekistonning birinchi bepul moliyaviy yordamchisan.
+@XusniddinWR tomonidan yaratilgan.
+Foydalanuvchi o'z moliyaviy holati haqida savol berdi.
+Senga foydalanuvchining bazasidagi barcha kerakli ma'lumotlar (CONTEXT) taqdim etildi.
+
+JAVOB TILI: {lang_name}
+FOYDALANUVCHI USLUBI: {seg.get('tone')}, {seg.get('age_group')} yosh segmenti.
+{knowledge_text}
+
+O'ZBEK QADRIYATLARI:
+- Hurmat, kamtarlik, samimiylik uslubi
+- Oila, farovonlik, barqarorlik so'zlarini ishlat
+- Yoshlarga qisqa va emoji bilan, katta yoshlilarga rasmiyroq va pozitiv
+
+CONTEXT:
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+SENING VAZIFANG:
+1. Foydalanuvchi savoliga CONTEXT asosida aniq javob ber.
+2. Agar xarajatlar ("bu oy qancha", "qayerga ko'p") haqida so'ralsa:
+   - Jami summani ayt.
+   - Eng ko'p sarflangan Top-3 kategoriyani foizlari bilan ko'rsat (masalan: 🍔 Oziq-ovqat — 180,000 (40%)).
+3. Agar bugungi xarajatlar so'ralsa: bugungi barcha xarajatlarni aniq qilib yoz.
+4. Agar balans so'ralsa: barcha hamyonlardagi qoldiqlarni sanab o't.
+5. Agar qarz so'ralsa: "Berishim kerak" va "Olishim kerak" qismlarini aniq ko'rsat (kimga, qancha, qachon).
+6. Har doim emoji ishlat va samimiy bo'l.
+7. Javob oxirida hamma vaqt yangi qatorda aynan shu matnni qoldir:
+   [📊 Batafsil ko'rish]
+
+QOIDALAR:
+- Faqat CONTEXT ichidagi raqamlardan foydalan.
+- Agar ma'lumot yo'q bo'lsa, buni muloyimlik bilan tushuntir.
+- Javob qisqa, tushunarli va o'qishga qulay (listlar bilan) bo'lsin. Markdowndagi qalin (**) shriftlardan o'rinli foydalan.
+- HAR DOIM oxirida moliyaviy yo'naltirish qo'sh: "Moliyaviy maqsadingiz bormi?" yoki "Boshlaylikmi? 💰"
+"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+        
+        try:
+            return await self.chat_completion_with_retry(messages, temperature=0.3, max_tokens=300)
+        except Exception as e:
+            logger.error(f"Failed to generate report response: {e}")
+            return "Kechirasiz, hozir hisobot tayyorlashda xatolik yuz berdi."
+            
+    # ═══════════════════════════════════════
+    # AQLLI MOLIYAVIY MASLAHAT
+    # ═══════════════════════════════════════
+    async def generate_smart_financial_advice(self, user_context: dict, financial_data: dict, trigger_type: str, language: str = "uz") -> str:
+        """
+        Foydalanuvchiga moliyaviy maslahat beradi.
+        trigger_type: 'monthly', 'user_requested', 'limit_reached', 'category_high'
+        """
+        lang_map = {"uz": "O'zbek", "en": "English", "ru": "Русский"}
+        lang_name = lang_map.get(language, "O'zbek")
+        
+        # Determine the tone based on trigger
+        tone_instruction = ""
+        if trigger_type == "monthly":
+            tone_instruction = "Siz oylik xulosaga mos ravishda bitta aniq, o'tgan oydagi yutuq yoki kamchilikni tahlil qilib maslahat berishingiz kerak."
+        elif trigger_type == "user_requested":
+            tone_instruction = "Foydalanuvchi o'zi maslahat so'radi. Do'stona, samimiy va motivatsion ruhda eng ko'p e'tibor qaratishi kerak bo'lgan joyni ko'rsating."
+        elif trigger_type == "limit_reached":
+            tone_instruction = "Foydalanuvchi oylik limitining 80% iga yetib keldi. Ogohlantiruvchi, lekin xavotirga solmaydigan, byudjetni saqlab qolish bo'yicha aniq maslahat bering."
+        elif trigger_type == "category_high":
+            tone_instruction = "Bitta kategoriyaga (masalan, taksi yoki oziq-ovqat) juda ko'p pul sarflangan. Shu kategoriyani qanday optimallashtirish mumkinligi haqida amaliy tejamkorlik maslahatini bering."
+            
+        system_prompt = f"""Sen Somly AI moliyaviy yordamchisisan.
+Sening asosiy maqsading insonlarga pullarini to'g'ri boshqarish va tejashni o'rgatishdir.
+JAVOB TILI: {lang_name}
+
+{tone_instruction}
+
+QOIDALAR:
+1. Maslahat qisqa (max 3-4 gap), tushunarli va amaliy bo'lishi kerak.
+2. Aniq raqamlardan (agar mavjud bo'lsa) foydalaning (masalan, 'Siz taksiga 40% sarfladingiz').
+3. O'zbekona lutf va emojilardan me'yorida foydalaning.
+4. "Qarz ko'p bo'lsa", qachon qaytarish kerakligi haqida iliq eslatma qiling.
+5. Agar tejash yaxshi bo'lsa, foydalanuvchini maqtab qo'ying.
+
+FOYDALANUVCHI MA'LUMOTLARI:
+- Ism: {user_context.get('full_name', 'Foydalanuvchi')}
+- Limit: {financial_data.get('limit', 0):,}
+- Aktiv qarzlar soni: {financial_data.get('active_debts_count', 0)} ({financial_data.get('total_debt_amount', 0):,} qarz)
+- Joriy oy kategoriyalari (Eng ko'p sarflanganlar): {json.dumps(financial_data.get('current_month_categories', [])[:3], ensure_ascii=False)}
+- Oxirgi 3 oy umumiy chiqimi: {json.dumps(financial_data.get('monthly_totals', []), ensure_ascii=False)}
+
+Vazifa: Kontekstni o'qib, foydalanuvchi uchun bitta eng zo'r moliyaviy maslahat yozib ber. 
+Faqat maslahat matnini qaytar, boshqa hech qanday so'z qo'shma.
+"""
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "Iltimos, menga moliyaviy maslahat bering."}
+        ]
+        
+        try:
+            response = await self.chat_completion_with_retry(
+                messages,
+                temperature=0.7,
+                max_tokens=300,
+            )
+            return response.strip()
+        except Exception as e:
+            logger.error(f"Failed to generate financial advice: {e}")
+            return "💡 Maslahat: Har bir xarajatni qayd etib borish kelajakda pulingizni boshqarishda katta yordam beradi!"
+
+    # ═══════════════════════════════════════
+    # AI KATEGORIYA TARJIMA
+    # ═══════════════════════════════════════
+    async def translate_category_name(self, english_name: str) -> str:
+        """
+        Inglizcha kategoriya nomini O'zbekchaga tarjima qiladi.
+        Masalan: "slap" → "Shapat", "gym" → "Sport zali"
+        """
+        if not english_name or len(english_name) < 2:
+            return english_name
+        
+        # Agar o'zbek tili bo'lsa qaytarib ber
+        if any(ord(c) > 127 for c in english_name):
+            return english_name
+        
+        messages = [
+            {"role": "system", "content": (
+                "Siz O'zbek tiliga tarjima qilish mutaxassisisiz. "
+                "Foydalanuvchi kategoriya nomini inglizcha aytdi. "
+                "Siz uni O'zbek tiliga qisqa va aniq tarjima qiling. "
+                "Faqat tarjimani yozing, boshqa narsa yozma. "
+                "Masalan:\n"
+                "- slap → Shapat\n"
+                "- gym → Sport zali\n"
+                "- coffee → Qahva\n"
+                "- transport → Transport\n"
+                "- electricity → Elektr\n"
+                "- internet → Internet\n"
+                "Faqat tarjimani yozing, boshqa hech narsa yo'q."
+            )},
+            {"role": "user", "content": english_name}
+        ]
+        
+        try:
+            result = await self.chat_completion_with_retry(
+                messages, temperature=0.3, max_tokens=30
+            )
+            return result.strip().strip('"').strip("'").strip(".")
+        except Exception as e:
+            logger.error(f"Error translating category name: {str(e)}")
+            return english_name
+
+    # ═══════════════════════════════════════
+    # AI KATEGORIYA ANIQLASH
+    # ═══════════════════════════════════════
+    async def detect_category_for_transaction(
+        self, 
+        description: str, 
+        personal_categories: list = None, 
+        system_categories: list = None,
+        user_id: int = 0
+    ) -> dict:
+        """
+        Tranzaksiya tavsifiga asoslanib eng mos kategoriyani aniqlaydi.
+        1. Shaxsiy kategoriyalardan qidiradi
+        2. 58 ta tizim kategoriyasidan qidiradi
+        3. Topilmasa → "Boshqa" kategoriyasi
+        """
+        
+        # Rate limit check
+        if user_id and not check_groq_limit(user_id):
+            logger.warning(f"User {user_id} hit Groq API limit for category detection")
+            return {"category": "Boshqa xarajat", "emoji": "📦", "confidence": 0.3}
+        
+        if not description or len(description) < 2:
+            return {"category": "Boshqa xarajat", "emoji": "📦", "confidence": 0.2}
+        
+        personal_categories = personal_categories or []
+        system_categories = system_categories or []
+        
+        # Kategoriyalar ro'yxatini formatlash
+        personal_cats_text = "\n".join([f"- {c.get('emoji', '📦')} {c.get('name', 'Noma\'lum')}" for c in personal_categories[:10]])
+        system_cats_text = "\n".join([f"- {c.get('emoji', '📦')} {c.get('name', 'Noma\'lum')}" for c in (system_categories or [])[:20]])
+        
+        messages = [
+            {"role": "system", "content": (
+                "Siz Somly AI - moliyaviy kategoriya aniqlash AI'si. "
+                "Foydalanuvchi tranzaksiya tavsifini aytdi. "
+                "Siz eng mos kategoriyani tanlashingiz kerak. "
+                "\nShaxsiy kategoriyalar:\n" + (personal_cats_text or "Yo'q") +
+                "\n\nTizim kategoriyalari:\n" + system_cats_text +
+                "\n\nJSON formatida javob ber:\n"
+                "{\n"
+                '  "category": "Kategoriya nomi",\n'
+                '  "emoji": "Emoji",\n'
+                '  "confidence": 0.0-1.0\n'
+                "}\n\n"
+                "Agar kategoriya topilmasa, 'Boshqa xarajat' ro'yxatidan foydalanish kerak."
+            )},
+            {"role": "user", "content": f"Tavsif: {description}"}
+        ]
+        
+        try:
+            result = await self.chat_completion_with_retry(
+                messages, temperature=0.3, max_tokens=100
+            )
+            
+            # JSON olish
+            data = json.loads(result)
+            return {
+                "category": data.get("category", "Boshqa xarajat"),
+                "emoji": data.get("emoji", "📦"),
+                "confidence": min(1.0, max(0.0, float(data.get("confidence", 0.5))))
+            }
+        except Exception as e:
+            logger.error(f"Error detecting category: {str(e)}")
+            return {"category": "Boshqa xarajat", "emoji": "📦", "confidence": 0.2}
 
 
 groq_service = GroqService()

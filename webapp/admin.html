@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Panel - Somly AI</title>
+    <style>
+        :root {
+            --bg-color: #f3f4f6;
+            --text-color: #1f2937;
+            --card-bg: #ffffff;
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --border-color: #e5e7eb;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+        }
+
+        /* Login Screen */
+        #login-screen {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            width: 100%;
+        }
+
+        .login-box {
+            background-color: var(--card-bg);
+            padding: 2.5rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            width: 100%;
+            max-width: 400px;
+        }
+
+        .login-box h2 {
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+            text-align: center;
+            font-size: 1.5rem;
+            color: #111827;
+        }
+
+        .form-group {
+            margin-bottom: 1rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+            font-size: 0.875rem;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .btn-submit {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            margin-top: 0.5rem;
+        }
+
+        .btn-submit:hover {
+            background-color: var(--primary-hover);
+        }
+
+        .error-msg {
+            color: #ef4444;
+            font-size: 0.875rem;
+            margin-top: 0.5rem;
+            text-align: center;
+            display: none;
+        }
+
+        /* Dashboard Screen */
+        #dashboard-screen {
+            display: none;
+            width: 100%;
+            max-width: 1200px;
+            padding: 2rem;
+            box-sizing: border-box;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 1.875rem;
+            color: #111827;
+        }
+
+        .btn-logout {
+            background-color: #ef4444;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .btn-logout:hover {
+            background-color: #dc2626;
+        }
+
+        /* Data Table */
+        .table-container {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+        }
+
+        th, td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background-color: #f9fafb;
+            font-weight: 600;
+            font-size: 0.875rem;
+            color: #4b5563;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+        }
+
+        td {
+            font-size: 0.875rem;
+            color: #1f2937;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover {
+            background-color: #f9fafb;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .status-active {
+            background-color: #dcfce7;
+            color: #166534;
+        }
+
+        .status-inactive {
+            background-color: #fee2e2;
+            color: #991b1b;
+        }
+
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 3rem;
+            color: #6b7280;
+            font-size: 1.125rem;
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.5rem;
+        }
+
+        .tab-btn {
+            background: none;
+            border: none;
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            font-weight: 500;
+            color: #6b7280;
+            cursor: pointer;
+            border-radius: 6px;
+        }
+
+        .tab-btn.active {
+            color: var(--primary);
+            background-color: #eff6ff;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+
+    </style>
+</head>
+<body>
+
+    <!-- Login Screen -->
+    <div id="login-screen">
+        <div class="login-box">
+            <h2>Admin Kirish</h2>
+            <form id="login-form">
+                <div class="form-group">
+                    <label for="login">Login</label>
+                    <input type="text" id="login" required autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="password">Parol</label>
+                    <input type="password" id="password" required>
+                </div>
+                <button type="submit" class="btn-submit">Kirish</button>
+                <div id="login-error" class="error-msg">Login yoki parol noto'g'ri!</div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Dashboard Screen -->
+    <div id="dashboard-screen">
+        <div class="header">
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <img src="/src/somly.jpg" alt="Somly Logo" style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;">
+                <h1>Admin Panel</h1>
+            </div>
+            <button class="btn-logout" id="btn-logout">Chiqish</button>
+        </div>
+        
+        <div class="tabs">
+            <button class="tab-btn active" onclick="switchTab('users-tab', this)">Foydalanuvchilar Segmentatsiyasi</button>
+            <button class="tab-btn" onclick="switchTab('referrals-tab', this); loadReferrals()">Referal Statistikasi</button>
+        </div>
+
+        <div id="users-tab" class="tab-content active">
+            <div class="table-container">
+                <table id="users-table">
+                    <thead>
+                        <tr>
+                            <th>Ism</th>
+                            <th>Username</th>
+                            <th>Telefon</th>
+                            <th>Yosh</th>
+                            <th>Davlat</th>
+                            <th>Viloyat</th>
+                            <th>Til</th>
+                            <th>Qo'shilgan sana</th>
+                            <th>Oxirgi faollik</th>
+                            <th>Holat</th>
+                        </tr>
+                    </thead>
+                    <tbody id="users-body">
+                        <tr><td colspan="10" class="loading">Yuklanmoqda...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="referrals-tab" class="tab-content">
+            <div class="table-container">
+                <table id="referrals-table">
+                    <thead>
+                        <tr>
+                            <th>O'rin</th>
+                            <th>User ID</th>
+                            <th>Ism</th>
+                            <th>Taklif qilganlar soni</th>
+                            <th>Oxirgi taklif sanasi</th>
+                        </tr>
+                    </thead>
+                    <tbody id="referrals-body">
+                        <tr><td colspan="5" class="loading">Yuklanmoqda...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const loginScreen = document.getElementById('login-screen');
+        const dashboardScreen = document.getElementById('dashboard-screen');
+        const loginForm = document.getElementById('login-form');
+        const loginError = document.getElementById('login-error');
+        const btnLogout = document.getElementById('btn-logout');
+        const usersBody = document.getElementById('users-body');
+
+        // Check if already logged in (using simple localStorage token for this demo)
+        const token = localStorage.getItem('admin_token');
+        if (token) {
+            showDashboard(token);
+        }
+
+        loginForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const login = document.getElementById('login').value;
+            const password = document.getElementById('password').value;
+            loginError.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ login, password })
+                });
+
+                const data = await res.json();
+                if (data.success && data.token) {
+                    localStorage.setItem('admin_token', data.token);
+                    showDashboard(data.token);
+                } else {
+                    loginError.style.display = 'block';
+                }
+            } catch (err) {
+                console.error(err);
+                loginError.innerText = "Xatolik yuz berdi. Server ishlayaptimi?";
+                loginError.style.display = 'block';
+            }
+        });
+
+        btnLogout.addEventListener('click', () => {
+            localStorage.removeItem('admin_token');
+            loginScreen.style.display = 'flex';
+            dashboardScreen.style.display = 'none';
+            document.getElementById('login').value = '';
+            document.getElementById('password').value = '';
+        });
+
+        async function showDashboard(authToken) {
+            loginScreen.style.display = 'none';
+            dashboardScreen.style.display = 'block';
+            await loadUsers(authToken);
+        }
+
+        function switchTab(tabId, btn) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+            btn.classList.add('active');
+        }
+
+        async function loadUsers(authToken) {
+            try {
+                const res = await fetch('/api/admin/users', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (res.status === 401 || res.status === 403) {
+                    btnLogout.click(); // invalid token
+                    return;
+                }
+
+                const users = await res.json();
+                renderTable(users);
+            } catch (err) {
+                console.error(err);
+                usersBody.innerHTML = `<tr><td colspan="10" class="loading" style="color:red">Ma'lumotlarni yuklashda xatolik yuz berdi.</td></tr>`;
+            }
+        }
+
+        function renderTable(users) {
+            if (!users || users.length === 0) {
+                usersBody.innerHTML = `<tr><td colspan="10" class="loading">Hali foydalanuvchilar yo'q.</td></tr>`;
+                return;
+            }
+
+            let html = '';
+            users.forEach(u => {
+                const statusClass = u.is_active !== false ? 'status-active' : 'status-inactive';
+                const statusText = u.is_active !== false ? 'Faol' : 'Faol emas';
+                
+                html += `
+                    <tr>
+                        <td>${u.full_name || '-'}</td>
+                        <td>${u.username ? '@'+u.username : '-'}</td>
+                        <td>${u.phone_number || '-'}</td>
+                        <td>${u.age || '-'}</td>
+                        <td>${u.location || '-'}</td>
+                        <td>${u.region || '-'}</td>
+                        <td>${(u.language || 'uz').toUpperCase()}</td>
+                        <td>${u.created_at || '-'}</td>
+                        <td>${u.last_active || '-'}</td>
+                        <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                    </tr>
+                `;
+            });
+            usersBody.innerHTML = html;
+        }
+
+        async function loadReferrals() {
+            const authToken = localStorage.getItem('admin_token');
+            const referralsBody = document.getElementById('referrals-body');
+            try {
+                const res = await fetch('/api/admin/referrals', {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+
+                if (res.status === 401 || res.status === 403) {
+                    btnLogout.click();
+                    return;
+                }
+
+                const stats = await res.json();
+                
+                if (!stats || stats.length === 0) {
+                    referralsBody.innerHTML = `<tr><td colspan="5" class="loading">Hali referallar yo'q.</td></tr>`;
+                    return;
+                }
+
+                let html = '';
+                stats.forEach((s, index) => {
+                    let dateStr = '-';
+                    if (s.last_date) {
+                        const d = new Date(s.last_date);
+                        dateStr = d.toLocaleString('uz-UZ');
+                    }
+                    html += `
+                        <tr>
+                            <td>#${index + 1}</td>
+                            <td>${s.user_id}</td>
+                            <td>${s.name}</td>
+                            <td><strong>${s.count}</strong></td>
+                            <td>${dateStr}</td>
+                        </tr>
+                    `;
+                });
+                referralsBody.innerHTML = html;
+            } catch (err) {
+                console.error(err);
+                referralsBody.innerHTML = `<tr><td colspan="5" class="loading" style="color:red">Ma'lumotlarni yuklashda xatolik yuz berdi.</td></tr>`;
+            }
+        }
+    </script>
+</body>
+</html>

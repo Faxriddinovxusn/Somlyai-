@@ -5,12 +5,14 @@ Scheduler — background tasks.
 import logging
 from datetime import datetime, timedelta
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.database import (
     users_collection, debts_collection, transactions_collection,
-    get_monthly_expense, get_monthly_income, get_user_balance
+    get_monthly_expense, get_monthly_income, get_user_balance,
+    get_webapp_url
 )
+from src.config import ADMIN_ID
 
 logger = logging.getLogger(__name__)
 
@@ -27,45 +29,20 @@ def format_number(num: float) -> str:
 
 
 # ═══════════════════════════════════════
-# ERTALABGI ESLATMA (08:00)
+# ERTALABGI ESLATMA (09:00)
 # ═══════════════════════════════════════
 async def check_morning_reminders(bot: Bot):
-    today = datetime.utcnow()
-    yesterday = today - timedelta(days=1)
-    yesterday_start = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday_end = yesterday.replace(hour=23, minute=59, second=59, microsecond=999999)
-
     cursor = users_collection.find({"settings.morning_reminder": True})
     users = await cursor.to_list(length=10000)
 
     for user in users:
         telegram_id = user["telegram_id"]
-        # Fariq uchun UZS balansi olinadi (asosiysi)
-        currency = "UZS"
-        
-        # Kecha sarflagan:
-        tx_cursor = transactions_collection.find({
-            "telegram_id": telegram_id,
-            "type": "chiqim",
-            "currency": currency,
-            "affects_balance": True,
-            "created_at": {"$gte": yesterday_start, "$lte": yesterday_end}
-        })
-        yesterday_txs = await tx_cursor.to_list(length=100)
-        yesterday_expense = sum(tx["amount"] for tx in yesterday_txs)
-
-        # Bu oy sarflagan:
-        month_expense = await get_monthly_expense(telegram_id, currency)
-        
-        # Balans:
-        balance = await get_user_balance(telegram_id, currency)
+        first_name = user.get("full_name", "").split()[0] if user.get("full_name") else "do'stim"
 
         msg = (
-            f"☀️ Xayrli tong!\n\n"
-            f"📉 Kecha sarflagan: {format_number(yesterday_expense)} {currency}\n"
-            f"📊 Bu oy sarflagan: {format_number(month_expense)} {currency}\n"
-            f"💰 Balans: {format_number(balance)} {currency}\n\n"
-            f"💡 Bugungi xarajatlarni yozishni unutmang!"
+            f"☀️ Assalomu alaykum, {first_name}!\n"
+            f"Kuningiz hisobli o'tsin!\n"
+            f"Xarajatlaringizni yuritishni unutmang 😇"
         )
         try:
             await bot.send_message(chat_id=telegram_id, text=msg)
@@ -74,35 +51,21 @@ async def check_morning_reminders(bot: Bot):
 
 
 # ═══════════════════════════════════════
-# KUNDUZGI ESLATMA (21:00)
+# KUNDUZGI ESLATMA (15:00)
 # ═══════════════════════════════════════
 async def check_evening_reminders(bot: Bot):
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    
     cursor = users_collection.find({"settings.evening_reminder": True})
     users = await cursor.to_list(length=10000)
 
     for user in users:
         telegram_id = user["telegram_id"]
-        currency = "UZS"
         
-        tx_cursor = transactions_collection.find({
-            "telegram_id": telegram_id,
-            "currency": currency,
-            "affects_balance": True,
-            "created_at": {"$gte": today_start}
-        })
-        today_txs = await tx_cursor.to_list(length=100)
-        
-        kirim = sum(tx["amount"] for tx in today_txs if tx["type"] == "kirim")
-        chiqim = sum(tx["amount"] for tx in today_txs if tx["type"] == "chiqim")
-
         msg = (
-            f"🌙 Xayrli kech!\n\n"
-            f"Bugun:\n"
-            f"💰 Kirim: {format_number(kirim)} {currency}\n"
-            f"💸 Chiqim: {format_number(chiqim)} {currency}\n\n"
-            f"Bugungi xarajatlaringizni to'liq kirdingizmi? ✅"
+            f"💬 Somly AI aloqada.\n"
+            f"Ertalabdan hozirgacha bo'lgan\n"
+            f"hisobingizni kiritdingizmi?\n"
+            f"Esingizdan chiqmasidan yuborib \n"
+            f"qo'ying. Bunga 30 soniya yetarli."
         )
         try:
             await bot.send_message(chat_id=telegram_id, text=msg)
@@ -181,6 +144,25 @@ async def check_monthly_summary(bot: Bot):
             f"{top_cat_str}\n\n"
             f"Yangi oyda omad! 💪"
         )
+        
+        # ─── AQLLI MASLAHAT QO'SHISH ───
+        try:
+            from src.database import get_financial_advice_context, update_last_advice_date
+            from src.services.groq_service import groq_service
+            
+            context_data = await get_financial_advice_context(telegram_id, currency)
+            advice_msg = await groq_service.generate_smart_financial_advice(
+                user_context=user,
+                financial_data=context_data,
+                trigger_type="monthly",
+                language=user.get("language", "uz")
+            )
+            if advice_msg:
+                msg += f"\n\n{advice_msg}"
+                await update_last_advice_date(telegram_id)
+        except Exception as e:
+            logger.error(f"Monthly advice error for {telegram_id}: {e}")
+
         try:
             await bot.send_message(chat_id=telegram_id, text=msg)
         except Exception as e:
@@ -239,8 +221,8 @@ async def check_debt_reminders(bot: Bot):
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
-                        InlineKeyboardButton(text="✅ Ha, qaytardi", callback_data=f"debt_paid:{debt_id}"),
-                        InlineKeyboardButton(text="❌ Yo'q, hali", callback_data=f"debt_not_paid:{debt_id}")
+                        InlineKeyboardButton(text="✅ Qaytdi", callback_data=f"debt_paid:{debt_id}"),
+                        InlineKeyboardButton(text="⏰ Uzayt", callback_data=f"debt_not_paid:{debt_id}")
                     ]
                 ])
             elif delta < 0 and abs(delta) % 3 == 0:
@@ -266,8 +248,8 @@ async def check_debt_reminders(bot: Bot):
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [
-                        InlineKeyboardButton(text="✅ Ha, qaytardim", callback_data=f"debt_paid:{debt_id}"),
-                        InlineKeyboardButton(text="❌ Yo'q, hali", callback_data=f"debt_not_paid:{debt_id}")
+                        InlineKeyboardButton(text="✅ Qaytdi", callback_data=f"debt_paid:{debt_id}"),
+                        InlineKeyboardButton(text="⏰ Uzayt", callback_data=f"debt_not_paid:{debt_id}")
                     ]
                 ])
             elif delta < 0 and abs(delta) % 3 == 0:
@@ -279,23 +261,223 @@ async def check_debt_reminders(bot: Bot):
 
         if msg:
             try:
-                if keyboard:
-                    await bot.send_message(chat_id=telegram_id, text=msg, reply_markup=keyboard)
-                else:
-                    await bot.send_message(chat_id=telegram_id, text=msg)
+                if not keyboard:
+                    # Oddiy eslatma uchun ham tugmalar
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [
+                            InlineKeyboardButton(text="✅ Qaytdi", callback_data=f"debt_paid:{debt_id}"),
+                            InlineKeyboardButton(text="⏰ Uzayt", callback_data=f"debt_not_paid:{debt_id}")
+                        ]
+                    ])
+                await bot.send_message(chat_id=telegram_id, text=msg, reply_markup=keyboard)
             except Exception as e:
                 pass
+
+
+# ═══════════════════════════════════════
+# DATA INTEGRITY (02:00 AM)
+# ═══════════════════════════════════════
+async def daily_balance_integrity_check(bot: Bot):
+    """
+    Kunda bir marta (02:00) barcha balanslarni noldan hisoblab chiqadi.
+    Agar joriy balans xato bo'lsa, to'g'irlaydi va adminga xabar beradi.
+    """
+    logger.info("Starting Daily Balance Integrity Check...")
+    cursor = users_collection.find({})
+    users = await cursor.to_list(length=10000)
+    
+    discrepancies = 0
+    
+    for user in users:
+        telegram_id = user["telegram_id"]
+        balances = user.get("balances", {})
+        
+        for currency, bal_data in balances.items():
+            current_balance = float(bal_data.get("amount", 0))
+            
+            # Recalculate from pure transactions
+            pipeline = [
+                {"$match": {
+                    "telegram_id": telegram_id,
+                    "currency": currency,
+                    "affects_balance": True
+                }},
+                {"$group": {
+                    "_id": "$type",
+                    "total": {"$sum": "$amount"}
+                }}
+            ]
+            res = await transactions_collection.aggregate(pipeline).to_list(length=2)
+            totals = {r["_id"]: float(r["total"]) for r in res}
+            kirim = totals.get("kirim", 0.0)
+            chiqim = totals.get("chiqim", 0.0)
+            
+            true_balance = kirim - chiqim
+            
+            if abs(current_balance - true_balance) > 0.01:
+                # Discrepancy found! Fix it.
+                await users_collection.update_one(
+                    {"telegram_id": telegram_id},
+                    {"$set": {f"balances.{currency}.amount": true_balance}}
+                )
+                discrepancies += 1
+                logger.warning(f"Integrity check: User {telegram_id} {currency} balance corrected from {current_balance} to {true_balance}")
+                
+    if discrepancies > 0 and ADMIN_ID:
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Tungi yaxlitlik tekshiruvi: {discrepancies} ta xato balans topildi va tuzatildi.")
+        except Exception:
+            pass
+    logger.info(f"Daily Balance Integrity Check finished. Fixed {discrepancies} discrepancies.")
+
+
+# ═══════════════════════════════════════
+# WEEKLY CLEANUP (03:00 AM, Sunday)
+# ═══════════════════════════════════════
+async def weekly_cleanup(bot: Bot):
+    """
+    Inactive userlarni (6 oy) is_active=False qiladi va tozalash ishlarini bajaradi.
+    """
+    logger.info("Starting Weekly Cleanup...")
+    six_months_ago = datetime.utcnow() - timedelta(days=180)
+    
+    res = await users_collection.update_many(
+        {"last_active": {"$lt": six_months_ago}, "is_active": True},
+        {"$set": {"is_active": False}}
+    )
+    
+    if res.modified_count > 0:
+        logger.info(f"Weekly cleanup: {res.modified_count} users marked as inactive.")
+
+
+# ═══════════════════════════════════════
+# SYSTEM MONITORING (Har 5 minut)
+# ═══════════════════════════════════════
+async def monitor_system_health(bot: Bot):
+    """
+    Har 5 minutda MongoDB va Groq API ni tekshiradi.
+    Agar ishlamasa Adminga yozadi.
+    """
+    errors = []
+    
+    # 1. Check DB
+    try:
+        await users_collection.find_one({})
+    except Exception as e:
+        errors.append(f"❌ MongoDB ishlamayapti: {str(e)[:50]}")
+        
+    # 2. Check Groq API
+    try:
+        from src.services.groq_service import groq_service
+        client = groq_service.get_client()
+        # Very lightweight check just to test connection
+        await client.models.list()
+    except Exception as e:
+        errors.append(f"❌ Groq API ishlamayapti: {str(e)[:50]}")
+        
+    if errors and ADMIN_ID:
+        msg = "🚨 MONITORING ALERT:\n\n" + "\n".join(errors)
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=msg)
+        except Exception:
+            pass
+
+
+# ═══════════════════════════════════════
+# GROQ API KEYS MONITORING
+# ═══════════════════════════════════════
+async def check_groq_keys_health(bot: Bot):
+    """Har 5 minutda ishlaydi, Groq keylar holatini tekshiradi va log qiladi."""
+    from src.services.groq_service import groq_service
+    import time
+    
+    now = time.time()
+    for ks in groq_service.keys_stats:
+        if ks.status == "cooling" and now - ks.last_error_time > 60:
+            ks.status = "active"
+            ks.connection_errors = 0
+            logger.info(f"Groq API Key {ks.index+1} reactivated via scheduler.")
+
+
+async def send_daily_api_report(bot: Bot):
+    """Har kuni 08:00 da admin ga Groq keylar hisobotini jo'natadi."""
+    if not ADMIN_ID:
+        return
+        
+    from src.services.groq_service import groq_service
+    import time
+    
+    now = time.time()
+    msg_parts = ["📊 API Keys holati:"]
+    
+    for ks in groq_service.keys_stats:
+        if ks.status == "active":
+            msg_parts.append(f"✅ Key {ks.index+1}: Aktiv ({ks.requests_count} so'rov)")
+        elif ks.status == "cooling":
+            rem = max(0, int(60 - (now - ks.last_error_time)))
+            msg_parts.append(f"⚠️ Key {ks.index+1}: Cooling ({rem} soniya qoldi)")
+        else:
+            msg_parts.append(f"❌ Key {ks.index+1}: Exhausted")
+            
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text="\n".join(msg_parts))
+    except Exception as e:
+        logger.error(f"Failed to send daily API report: {e}")
+
+# ═══════════════════════════════════════
+# AI TOMONIDAN YARATILGAN MAXSUS ESLATMALAR
+# ═══════════════════════════════════════
+async def check_custom_reminders(bot: Bot):
+    """
+    AI tomonidan 'reminders' kolleksiyasiga saqlangan vaqti kelgan eslatmalarni yuboradi.
+    """
+    from src.database import reminders_collection, update_reminder_status
+    now = datetime.utcnow()
+    try:
+        cursor = reminders_collection.find({
+            "status": "pending",
+            "remind_at": {"$lte": now}
+        })
+        reminders = await cursor.to_list(length=50)
+        
+        for rem in reminders:
+            user_id = rem.get("user_id")
+            message = rem.get("message", "Eslatma!")
+            reminder_id = str(rem["_id"])
+            
+            text = f"⏰ <b>Eslatma:</b>\n\n{message}"
+            
+            try:
+                await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+                await update_reminder_status(reminder_id, "sent")
+                logger.info(f"Custom reminder {reminder_id} sent to {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to send custom reminder to {user_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error checking custom reminders: {e}")
 
 
 def setup_scheduler(bot: Bot):
     global _bot_ref
     _bot_ref = bot
 
-    # Ertalab 08:00
-    scheduler.add_job(check_morning_reminders, trigger="cron", hour=8, minute=0, args=[bot], id="morning_reminders", replace_existing=True)
+    from src.services.currency_service import fetch_and_cache_cbu_rates
     
-    # Kechqurun 21:00
-    scheduler.add_job(check_evening_reminders, trigger="cron", hour=21, minute=0, args=[bot], id="evening_reminders", replace_existing=True)
+    # AI maxsus eslatmalari (har daqiqada tekshiriladi)
+    scheduler.add_job(check_custom_reminders, trigger="interval", minutes=1, args=[bot], id="custom_reminders", replace_existing=True)
+
+    # Har 1 soatda valyuta kurslarini CBU dan olish
+    scheduler.add_job(fetch_and_cache_cbu_rates, trigger="interval", hours=1, id="update_currency_rates", replace_existing=True)
+
+    # Ertalab 09:00
+    scheduler.add_job(check_morning_reminders, trigger="cron", hour=9, minute=0, args=[bot], id="morning_reminders", replace_existing=True)
+    
+    # Kunduzgi 15:00
+    scheduler.add_job(check_evening_reminders, trigger="cron", hour=15, minute=0, args=[bot], id="evening_reminders", replace_existing=True)
+    
+    # Kunlik hisobot 23:00 da
+    scheduler.add_job(check_daily_reports, trigger="cron", hour=23, minute=0, args=[bot], id="daily_reports", replace_existing=True)
     
     # Har oy 1-kuni 10:00 da
     scheduler.add_job(check_monthly_summary, trigger="cron", day=1, hour=10, minute=0, args=[bot], id="monthly_summary", replace_existing=True)
@@ -303,8 +485,219 @@ def setup_scheduler(bot: Bot):
     # Qarzlar 09:00 da
     scheduler.add_job(check_debt_reminders, trigger="cron", hour=9, minute=0, args=[bot], id="debt_reminders", replace_existing=True)
     
+    # Data Integrity 02:00 da
+    scheduler.add_job(daily_balance_integrity_check, trigger="cron", hour=2, minute=0, args=[bot], id="integrity_check", replace_existing=True)
+    
+    # Weekly Cleanup Yakshanba 03:00 da
+    scheduler.add_job(weekly_cleanup, trigger="cron", day_of_week="sun", hour=3, minute=0, args=[bot], id="weekly_cleanup", replace_existing=True)
+    
+    # System Monitoring har 5 minutda
+    scheduler.add_job(monitor_system_health, trigger="interval", minutes=5, args=[bot], id="system_monitoring", replace_existing=True)
+    
+    # Groq Keys Monitoring har 5 minutda
+    scheduler.add_job(check_groq_keys_health, trigger="interval", minutes=5, args=[bot], id="groq_keys_health", replace_existing=True)
+    
+    # Groq Keys Kunlik Hisobot 08:00 da
+    scheduler.add_job(send_daily_api_report, trigger="cron", hour=8, minute=0, args=[bot], id="daily_api_report", replace_existing=True)
+    
+    # Har daqiqada eslatmalarni tekshirish
+    scheduler.add_job(check_pending_reminders, trigger="interval", minutes=1, args=[bot], id="check_pending_reminders", replace_existing=True)
+    
     scheduler.start()
+
+
+# ═══════════════════════════════════════
+# SMART REMINDERS (Yangi)
+# ═══════════════════════════════════════
+
+async def check_pending_reminders(bot: Bot):
+    """Pending holatdagi vaqti kelgan eslatmalarni yuboradi."""
+    from src.database import get_pending_reminders, update_reminder_status
+    from src.handlers.message_handler import build_reminder_keyboard
+    
+    reminders = await get_pending_reminders()
+    if not reminders:
+        return
+        
+    for r in reminders:
+        user_id = r["user_id"]
+        msg_text = r["message"]
+        reminder_id = str(r["_id"])
+        
+        text = (
+            f"⏰ Eslatma!\n\n"
+            f"{msg_text}"
+        )
+        
+        kb = build_reminder_keyboard(reminder_id)
+        
+        try:
+            await bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
+            await update_reminder_status(reminder_id, "reminded")
+        except Exception as e:
+            logger.error(f"Failed to send reminder {reminder_id}: {e}")
     logger.info("Scheduler started — Cron jobs loaded.")
+    logger.info("📅 Morning reminders at 09:00, Evening reminders at 15:00, Daily reports at 23:00, Currency updates every 1 hr.")
+
+
+# ═══════════════════════════════════════
+# KUNLIK HISOBOT (23:00)
+# ═══════════════════════════════════════
+async def check_daily_reports(bot: Bot):
+    """
+    Har kuni 23:00 da kunlik hisobot yuboradi.
+    Balans, kirim, chiqim, qarz va eng ko'p sarflagan kategoriyani ko'rsatadi.
+    """
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=999999)
+    today_date = datetime.utcnow().strftime("%d.%m.%Y")
+
+    cursor = users_collection.find({})
+    users = await cursor.to_list(length=10000)
+
+    for user in users:
+        telegram_id = user["telegram_id"]
+        balances = user.get("balances", {})
+        
+        # Agar balans bo'lmasa, hisobot yubormasak bo'ladi
+        if not balances:
+            continue
+
+        try:
+            # ─── BALANSLAR ───
+            balance_section = []
+            emojis = {"UZS": "🟢", "USD": "🟡", "Humo": "🟣"}
+            
+            for currency, bal_data in balances.items():
+                emoji = emojis.get(currency, "💵")
+                amount = bal_data.get("amount", 0)
+                balance_section.append(f"  {emoji} {currency}: {format_number(amount)} {currency}")
+
+            # ─── TRANZAKSIYALAR (BUGUN) ───
+            tx_cursor = transactions_collection.find({
+                "telegram_id": telegram_id,
+                "affects_balance": True,
+                "created_at": {"$gte": today_start, "$lte": today_end}
+            })
+            today_txs = await tx_cursor.to_list(length=500)
+
+            # Group by type and currency
+            kirim_by_currency = {}
+            chiqim_by_currency = {}
+            
+            for tx in today_txs:
+                curr = tx.get("currency", "UZS")
+                amount = tx["amount"]
+                
+                if tx["type"] == "kirim":
+                    kirim_by_currency[curr] = kirim_by_currency.get(curr, 0) + amount
+                else:
+                    chiqim_by_currency[curr] = chiqim_by_currency.get(curr, 0) + amount
+
+            # ─── KIRIM SECTION ───
+            kirim_section = []
+            total_kirim = sum(kirim_by_currency.values())
+            
+            if total_kirim > 0:
+                for currency, amount in kirim_by_currency.items():
+                    pct = int((amount / total_kirim) * 100) if total_kirim > 0 else 0
+                    kirim_section.append(f"  {currency}: +{format_number(amount)} {currency} ({pct}%)")
+
+            # ─── CHIQIM SECTION ───
+            chiqim_section = []
+            total_chiqim = sum(chiqim_by_currency.values())
+            
+            if total_chiqim > 0:
+                for currency, amount in chiqim_by_currency.items():
+                    chiqim_section.append(f"  {currency}: -{format_number(amount)} {currency}")
+
+            # ─── QARZLAR ───
+            debt_cursor = debts_collection.find({
+                "telegram_id": telegram_id,
+                "status": {"$in": ["active", "partial"]}
+            })
+            debts = await debt_cursor.to_list(length=500)
+            
+            berildi = 0  # Sen bergan (olishim kerak)
+            olindi = 0   # Ular bergan (berishim kerak)
+            
+            for debt in debts:
+                direction = debt.get("direction", "bergan")
+                remaining = debt.get("amount", 0) - debt.get("paid_amount", 0)
+                
+                if direction == "bergan":  # Ular senga qarzdir (Olishim kerak)
+                    berildi += remaining
+                else:  # Sen ularga qarzsan (Berishim kerak)
+                    olindi += remaining
+
+            # ─── ENG KO'P SARFLAGAN KATEGORIYA ───
+            cat_pipeline = [
+                {"$match": {
+                    "telegram_id": telegram_id,
+                    "type": "chiqim",
+                    "created_at": {"$gte": today_start, "$lte": today_end}
+                }},
+                {"$group": {
+                    "_id": "$category",
+                    "total": {"$sum": "$amount"}
+                }},
+                {"$sort": {"total": -1}},
+                {"$limit": 1}
+            ]
+            top_cat_res = await transactions_collection.aggregate(cat_pipeline).to_list(length=1)
+            top_category = ""
+            if top_cat_res:
+                cat_name = top_cat_res[0]["_id"]
+                top_category = f"🏆 Eng ko'p: {cat_name}"
+
+            # ─── XABAR QURISH ───
+            msg_parts = [f"📊 {today_date} — Kunlik hisobingiz\n"]
+
+            # Balanslar
+            if balance_section:
+                msg_parts.append("💳 Balanslar:")
+                msg_parts.extend(balance_section)
+                msg_parts.append("")
+
+            # Kirim
+            if kirim_section:
+                msg_parts.append("💰 Kirim:")
+                msg_parts.extend(kirim_section)
+                msg_parts.append("")
+
+            # Chiqim
+            if chiqim_section:
+                msg_parts.append("💸 Chiqim:")
+                msg_parts.extend(chiqim_section)
+                msg_parts.append("")
+
+            # Qarzlar
+            if berildi > 0 or olindi > 0:
+                msg_parts.append("🤝 Qarzlar:")
+                if berildi > 0:
+                    msg_parts.append(f"  Berildi: {format_number(berildi)} UZS")
+                if olindi > 0:
+                    msg_parts.append(f"  Olindi: {format_number(olindi)} UZS")
+                msg_parts.append("")
+
+            # Eng ko'p
+            if top_category:
+                msg_parts.append(top_category)
+
+            # Agar hisobda hech narsa bo'lmasa
+            if len(msg_parts) == 1:  # Only the header
+                msg_parts.append("Bugun hech narsa kiritilmadi.")
+
+            msg = "\n".join(msg_parts)
+
+            try:
+                await bot.send_message(chat_id=telegram_id, text=msg)
+                logger.info(f"Daily report sent to {telegram_id}")
+            except Exception as e:
+                logger.error(f"Failed to send daily report to {telegram_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error generating daily report for {telegram_id}: {e}")
 
 
 # ═══════════════════════════════════════

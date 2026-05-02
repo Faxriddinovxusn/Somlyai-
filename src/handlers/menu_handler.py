@@ -1,16 +1,17 @@
 from aiogram import Router, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
-from src.database import get_webapp_url
+from src.database import get_webapp_url, get_user
+from src.services.i18n import t
 
 router = Router()
 
-async def get_main_keyboard() -> ReplyKeyboardMarkup:
+async def get_main_keyboard(lang: str = "uz") -> ReplyKeyboardMarkup:
     url = await get_webapp_url()
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📊 Mening hisobim", web_app=WebAppInfo(url=url)),
-                KeyboardButton(text="➕ Qo'shish")
+                KeyboardButton(text=t(lang, "main_menu_account"), web_app=WebAppInfo(url=url)),
+                KeyboardButton(text=t(lang, "main_menu_add"))
             ]
         ],
         resize_keyboard=True,
@@ -18,26 +19,28 @@ async def get_main_keyboard() -> ReplyKeyboardMarkup:
     )
     return keyboard
 
-@router.message(F.text == "➕ Qo'shish")
+def get_add_buttons():
+    return [t("uz", "main_menu_add"), t("ru", "main_menu_add"), t("en", "main_menu_add")]
+
+def get_account_buttons():
+    return [t("uz", "main_menu_account"), t("ru", "main_menu_account"), t("en", "main_menu_account")]
+
+@router.message(F.text.in_(get_add_buttons()))
 async def process_add_button(message: Message):
-    text = (
-        "Xarajat, daromad yoki qarzni yozing yoki ovoz yuboring:\n\n"
-        "💸 'Taksiga 15,000 so'm'\n"
-        "💰 'Oylik 4 million tushdi'\n"
-        "🤝 'Jasurga 100 ming berdim'\n"
-        "🎤 Mikrofon orqali ham ayta olasiz"
-    )
+    user = await get_user(message.from_user.id)
+    lang = user.get("language", "uz")
+    text = t(lang, "add_prompt")
     # Re-send the keyboard just in case they lost it
-    kbd = await get_main_keyboard()
+    kbd = await get_main_keyboard(lang)
     await message.answer(text, reply_markup=kbd)
 
-@router.message(F.text == "📊 Mening hisobim")
+@router.message(F.text.in_(get_account_buttons()))
 async def process_my_account_button(message: Message):
-    # This might only trigger on old clients or desktop clients that don't support web_app buttons
-    # or if the web_app property wasn't set correctly.
+    user = await get_user(message.from_user.id)
+    lang = user.get("language", "uz")
     url = await get_webapp_url()
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     kbd = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ochish", web_app=WebAppInfo(url=url))]
+        [InlineKeyboardButton(text=t(lang, "open_btn"), web_app=WebAppInfo(url=url))]
     ])
-    await message.answer("Mini Appni ochish uchun pastdagi tugmani bosing:", reply_markup=kbd)
+    await message.answer(t(lang, "open_miniapp_prompt"), reply_markup=kbd)

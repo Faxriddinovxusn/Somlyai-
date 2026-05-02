@@ -183,9 +183,9 @@ class SubscriptionMiddleware(BaseMiddleware):
     async def _redirect_to_registration(self, event, data, lang, state):
         """Ro'yxatdan o'tishga yo'naltirish."""
         ask_name = {
-            "uz": "🤝 Keling tanishib olamiz!\n\nIsmingizni kiriting (matn yoki ovozli):",
-            "en": "🤝 Let's get to know each other!\n\nPlease enter your name (text or voice):",
-            "ru": "🤝 Давайте познакомимся!\n\nВведите ваше имя (текст или голосовое):",
+            "uz": "🤝 Keling tanishib olamiz!\n\nTo'liq ismingizni kiriting (matn yoki ovozli):",
+            "en": "🤝 Let's get to know each other!\n\nPlease enter your full name (text or voice):",
+            "ru": "🤝 Давайте познакомимся!\n\nВведите ваше полное имя (текст или голосовое):",
         }
         if state:
             await state.set_state(RegistrationStates.waiting_for_name)

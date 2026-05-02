@@ -1,335 +1,404 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Calendar, TrendingUp, TrendingDown, ArrowUpRight, ArrowDownRight, Activity } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { ChevronLeft, ChevronRight, Calendar, X, TrendingUp, TrendingDown, RefreshCw } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { fetchApi, getExchangeRates } from '../utils/api';
+import { PieChart, Pie, Cell, ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RTooltip } from 'recharts';
+import { EmptyState, ErrorState, SkeletonPage } from '../components/StateViews';
+import PageHeader from '../components/PageHeader';
 
 const StatisticsPage = ({ initData }) => {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState(null);
-  
-  const [period, setPeriod] = useState('month');
-  const [currency, setCurrency] = useState('UZS');
-  const [tab, setTab] = useState('all');
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(false);
+  const [exchangeRates, setExchangeRates] = useState({});
 
-  useEffect(() => {
-    // Simulated fetching
-    setLoading(true);
-    setTimeout(() => {
-      setData({
-        metrics: {
-          income: 4310000,
-          expense: 1200000,
-          net: 3110000,
-          debtGive: 150000,
-          debtTake: 450000,
-        },
-        comparison: {
-          incomeDiff: 12, // +12%
-          expenseDiff: -3 // -3%
-        },
-        pieData: [
-          { name: '🍔 Ovqat', value: 450000, color: '#FF9F0A' },
-          { name: '🚕 Transport', value: 150000, color: '#0A84FF' },
-          { name: '🛒 Xaridlar', value: 300000, color: '#30D158' },
-          { name: '🏠 Uy-joy', value: 200000, color: '#FF453A' },
-          { name: '🎮 Ko\'ngilochar', value: 80000, color: '#BF5AF2' },
-          { name: 'Kichik xarajat', value: 20000, color: '#64D2FF' }
-        ],
-        lineData: [
-          { name: '1', kirim: 0, chiqim: 45000 },
-          { name: '5', kirim: 4000000, chiqim: 120000 },
-          { name: '10', kirim: 0, chiqim: 200000 },
-          { name: '15', kirim: 500000, chiqim: 300000 },
-          { name: '20', kirim: 0, chiqim: 150000 },
-          { name: '25', kirim: 0, chiqim: 80000 },
-          { name: '30', kirim: 0, chiqim: 100000 },
-        ]
-      });
-      setLoading(false);
-    }, 800);
-  }, [period, currency]);
+  // Filters
+  const [activeCurrency, setActiveCurrency] = useState('UZS');
+  const [activeTab, setActiveTab] = useState('Hammasi');
+  const [dateModal, setDateModal] = useState(false);
 
-  // Data processing for Donut Chart (< 2% logic)
-  const processedPieData = useMemo(() => {
-    if (!data?.pieData) return [];
-    const total = data.pieData.reduce((acc, curr) => acc + curr.value, 0);
-    const threshold = total * 0.02; // 2%
-    let othersValue = 0;
-    const result = [];
-    
-    data.pieData.forEach(item => {
-      if (item.value < threshold) {
-        othersValue += item.value;
-      } else {
-        result.push(item);
-      }
-    });
-    
-    if (othersValue > 0) {
-      result.push({ name: '🌐 Boshqalar', value: othersValue, color: '#8E8E93' });
-    }
-    
-    return result.sort((a, b) => b.value - a.value);
-  }, [data]);
+  // Date range
+  const [dateRange, setDateRange] = useState(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { start, end: now };
+  });
 
-  const totalPieValue = useMemo(() => {
-    return processedPieData.reduce((acc, curr) => acc + curr.value, 0);
-  }, [processedPieData]);
+  // Donut interaction
+  const [activeSlice, setActiveSlice] = useState(null);
 
-  const formatMoney = (amount) => {
-    if (amount >= 1000000) return (amount / 1000000).toFixed(1) + 'M';
-    if (amount >= 1000) return (amount / 1000).toFixed(0) + 'K';
-    return amount.toString();
+  const fmtDate = (d) => {
+    const months = ['Yan','Fev','Mar','Apr','May','Iyn','Iyl','Avg','Sen','Okt','Noy','Dek'];
+    return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
   };
 
-  const CustomTooltip = ({ active, payload }) => {
-    if (active && payload && payload.length) {
-      return (
-        <div style={{ backgroundColor: 'rgba(28, 28, 30, 0.95)', padding: '12px', borderRadius: '12px', border: '1px solid var(--border)', boxShadow: '0 4px 12px rgba(0,0,0,0.5)', backdropFilter: 'blur(10px)' }}>
-          <p style={{ fontWeight: '600', marginBottom: '4px', fontSize: '14px', color: 'white' }}>{payload[0].name}</p>
-          <p style={{ color: payload[0].payload.color || 'var(--primary)', fontWeight: 'bold', fontSize: '16px' }}>
-            {payload[0].value.toLocaleString()} {currency}
-          </p>
-        </div>
-      );
+  const fmtDateApi = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+  const loadData = async (bg = false) => {
+    if (!bg) setLoading(true);
+    try {
+      const s = fmtDateApi(dateRange.start);
+      const e = fmtDateApi(dateRange.end);
+      const res = await fetchApi(`/dashboard?start=${s}&end=${e}`);
+      if (res && !res.error) { setData(res); setError(false); }
+      
+      const rates = await getExchangeRates();
+      if (rates) setExchangeRates(rates);
+    } catch (err) {
+      if (err.message !== 'OFFLINE') setError(true);
+    } finally {
+      if (!bg) setLoading(false);
+      setRefreshing(false);
     }
-    return null;
+  };
+
+  const handleWs = useCallback(() => loadData(true), [dateRange]);
+
+  useEffect(() => { loadData(); }, [dateRange]);
+
+  useEffect(() => {
+    const evts = ['ws_transaction.created','ws_transaction.updated','ws_transaction.deleted','ws_balance.updated','ws_connected','ws_sync'];
+    evts.forEach(e => window.addEventListener(e, handleWs));
+    return () => evts.forEach(e => window.removeEventListener(e, handleWs));
+  }, [handleWs]);
+
+  const shiftDate = (dir) => {
+    const diff = dateRange.end - dateRange.start;
+    const days = Math.round(diff / 86400000) + 1;
+    setDateRange(prev => {
+      const ns = new Date(prev.start);
+      const ne = new Date(prev.end);
+      ns.setDate(ns.getDate() + (dir * days));
+      ne.setDate(ne.getDate() + (dir * days));
+      return { start: ns, end: ne };
+    });
+  };
+
+  const setPreset = (type) => {
+    const now = new Date();
+    if (type === 'today') {
+      setDateRange({ start: new Date(now), end: new Date(now) });
+    } else if (type === 'week') {
+      const s = new Date(now);
+      s.setDate(s.getDate() - 6);
+      setDateRange({ start: s, end: new Date(now) });
+    } else if (type === 'lastMonth') {
+      const s = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const e = new Date(now.getFullYear(), now.getMonth(), 0);
+      setDateRange({ start: s, end: e });
+    }
+    setDateModal(false);
+  };
+
+  // Derived data
+  const balances = data?.balances || [];
+  const currencies = balances.map(b => b.currency);
+  if (currencies.length === 0) currencies.push('UZS');
+
+  const statsObj = data?.stats?.[activeCurrency] || {};
+  const statData = statsObj[activeTab] || [];
+  const dailyStats = data?.daily_stats?.[activeCurrency] || {};
+  const comparison = data?.comparison?.[activeCurrency] || { kirim: { current: 0, prev: 0 }, chiqim: { current: 0, prev: 0 } };
+  const debts = data?.debts || { berishimKerak: 0, olishimKerak: 0 };
+
+  // Totals
+  const hammasiData = statsObj['Hammasi'] || [];
+  const totalKirim = hammasiData.find(s => s.name === 'Kirim')?.value || 0;
+  const totalChiqim = hammasiData.find(s => s.name === 'Chiqim')?.value || 0;
+  const totalQoldiq = totalKirim - totalChiqim;
+
+  // Chart data
+  const isEmpty = statData.reduce((a, c) => a + c.value, 0) === 0;
+  const chartData = isEmpty ? [{ name: "Ma'lumot yo'q", value: 1, color: '#38383A' }] : statData;
+
+  // Line chart
+  const lineData = Object.entries(dailyStats).sort(([a],[b]) => a.localeCompare(b)).map(([date, vals]) => {
+    const d = new Date(date);
+    return { name: `${d.getDate()}`, fullDate: date, kirim: vals.kirim || 0, chiqim: vals.chiqim || 0 };
+  });
+
+  // Comparison percentages
+  const kirimPct = comparison.kirim.prev > 0 ? Math.round(((comparison.kirim.current - comparison.kirim.prev) / comparison.kirim.prev) * 100) : (comparison.kirim.current > 0 ? 100 : 0);
+  const chiqimPct = comparison.chiqim.prev > 0 ? Math.round(((comparison.chiqim.current - comparison.chiqim.prev) / comparison.chiqim.prev) * 100) : (comparison.chiqim.current > 0 ? 100 : 0);
+
+  // Qarz tab data
+  const qarzData = [
+    { name: 'Berishim kerak', value: debts.berishimKerak || 0, color: '#FF453A', emoji: '💸' },
+    { name: 'Olishim kerak', value: debts.olishimKerak || 0, color: '#30D158', emoji: '💰' }
+  ];
+
+  const displayData = activeTab === 'Qarz' ? qarzData : chartData;
+  const displayEmpty = activeTab === 'Qarz' ? (qarzData[0].value + qarzData[1].value === 0) : isEmpty;
+  const finalChartData = displayEmpty ? [{ name: "Ma'lumot yo'q", value: 1, color: '#38383A' }] : displayData;
+
+  const centerLabel = activeTab === 'Hammasi' ? { label: 'Jami:', value: (totalKirim + totalChiqim) }
+    : activeTab === 'Kirim' ? { label: 'Jami kirim:', value: totalKirim }
+    : activeTab === 'Chiqim' ? { label: 'Jami chiqim:', value: totalChiqim }
+    : { label: 'Jami qarz:', value: debts.berishimKerak + debts.olishimKerak };
+
+  const legendTotal = displayData.reduce((a, c) => a + c.value, 0);
+
+  // Custom line tooltip
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (!active || !payload?.length) return null;
+    const item = payload[0]?.payload;
+    return (
+      <div style={{ background: 'rgba(0,0,0,0.85)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', padding: '10px 14px', backdropFilter: 'blur(10px)' }}>
+        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px' }}>{item?.fullDate}</p>
+        {payload.map((p, i) => (
+          <p key={i} style={{ fontSize: '13px', fontWeight: '600', color: p.color, margin: '2px 0' }}>
+            {p.name === 'kirim' ? 'Kirim' : 'Chiqim'}: {p.value?.toLocaleString()} {activeCurrency}
+          </p>
+        ))}
+      </div>
+    );
   };
 
   if (loading) {
-    return (
-      <div className="animate-fade-in" style={{ padding: '0 16px' }}>
-        <div className="skeleton" style={{ height: '40px', borderRadius: '20px', marginBottom: '16px', marginTop: '16px' }}></div>
-        <div className="skeleton" style={{ height: '180px', borderRadius: '16px', marginBottom: '16px' }}></div>
-        <div className="skeleton" style={{ height: '300px', borderRadius: '16px' }}></div>
-      </div>
-    );
+    return <SkeletonPage cards={4} />;
+  }
+
+  if (error && !data) {
+    return <ErrorState onRetry={() => loadData()} />;
   }
 
   return (
-    <div className="animate-fade-in" style={{ padding: '0 16px', paddingBottom: '24px' }}>
-      {/* Header */}
-      <div className="flex-between" style={{ marginBottom: '16px', paddingTop: '16px' }}>
-        <h1 className="title" style={{ margin: 0 }}>Statistika</h1>
-      </div>
+    <div className="animate-fade-in" style={{ padding: '0 16px 100px' }}>
+      {refreshing && (
+        <div style={{ textAlign: 'center', padding: '10px', color: 'var(--text-secondary)' }}>
+          <RefreshCw className="animate-spin" size={24} style={{ margin: '0 auto' }} />
+        </div>
+      )}
 
-      {/* Period Selector */}
-      <div className="no-scrollbar" style={{ display: 'flex', gap: '8px', overflowX: 'auto', marginBottom: '16px', paddingBottom: '4px' }}>
-        {['Bugun', 'Hafta', 'Oy', 'O\'tgan oy'].map(p => (
-          <button 
-            key={p} 
-            className={`chip ${period === (p === 'Oy' ? 'month' : p) ? 'active' : ''}`}
-            onClick={() => setPeriod(p === 'Oy' ? 'month' : p)}
-          >
-            {p}
-          </button>
-        ))}
-        <button className="chip" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Calendar size={14} /> Sana
+      {/* Header */}
+      <PageHeader title="Statistika" showLogo={true} />
+
+      {/* Date Range Selector */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', background: 'var(--card)', borderRadius: '16px', padding: '12px 16px', border: '1px solid var(--border)' }}>
+        <button onClick={() => shiftDate(-1)} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '10px', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-primary)', cursor: 'pointer' }}>
+          <ChevronLeft size={18} />
+        </button>
+        <button onClick={() => setDateModal(true)} style={{ background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: '15px', fontWeight: '600', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Calendar size={16} color="var(--primary)" />
+          {fmtDate(dateRange.start)} – {fmtDate(dateRange.end)}
+        </button>
+        <button onClick={() => shiftDate(1)} style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '10px', width: '36px', height: '36px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-primary)', cursor: 'pointer' }}>
+          <ChevronRight size={18} />
         </button>
       </div>
 
-      {/* Currency Filter */}
-      <div className="no-scrollbar" style={{ display: 'flex', gap: '8px', overflowX: 'auto', marginBottom: '24px', paddingBottom: '4px' }}>
-        {['UZS', 'USD', 'RUB', 'KZT'].map(c => (
-          <button 
-            key={c} 
-            className={`chip ${currency === c ? 'active' : ''}`}
-            onClick={() => setCurrency(c)}
-            style={{ padding: '6px 12px', fontSize: '13px', borderRadius: '8px' }}
-          >
-            {c}
+      {/* Currency Chips */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: (activeCurrency !== 'UZS' && exchangeRates[activeCurrency]) ? '8px' : '20px', overflowX: 'auto' }} className="no-scrollbar">
+        {currencies.map(c => (
+          <button key={c} onClick={() => setActiveCurrency(c)} style={{
+            padding: '8px 20px', borderRadius: '20px', fontSize: '14px', fontWeight: '600', border: 'none', cursor: 'pointer', transition: 'all 0.2s', flexShrink: 0,
+            background: activeCurrency === c ? 'var(--primary)' : 'var(--card)',
+            color: activeCurrency === c ? '#fff' : 'var(--text-secondary)',
+            boxShadow: activeCurrency === c ? '0 4px 12px var(--primary-glow)' : 'none'
+          }}>
+            {activeCurrency === c ? '● ' : '○ '}{balances.find(b => b.currency === c)?.title || c}
+          </button>
+        ))}
+      </div>
+      
+      {/* Exchange Rate Badge */}
+      {activeCurrency !== 'UZS' && exchangeRates[activeCurrency] && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '20px', padding: '0 4px' }}>
+          <span style={{ fontSize: '12px', fontWeight: '500', color: 'var(--primary)' }}>💱 1 {activeCurrency} = {exchangeRates[activeCurrency].toLocaleString('uz-UZ', {maximumFractionDigits: 2})} UZS</span>
+          <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>(Markaziy Bank)</span>
+        </div>
+      )}
+
+      {/* Summary Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '24px' }}>
+        {[
+          { icon: '💰', label: 'Kirim', value: totalKirim, color: '#30D158', bg: 'rgba(48,209,88,0.08)', border: 'rgba(48,209,88,0.2)' },
+          { icon: '💸', label: 'Chiqim', value: totalChiqim, color: '#FF453A', bg: 'rgba(255,69,58,0.08)', border: 'rgba(255,69,58,0.2)' },
+          { icon: '✅', label: 'Qoldiq', value: totalQoldiq, color: totalQoldiq >= 0 ? '#30D158' : '#FF453A', bg: 'rgba(10,132,255,0.08)', border: 'rgba(10,132,255,0.2)' }
+        ].map((c, i) => (
+          <div key={i} style={{ background: c.bg, border: `1px solid ${c.border}`, borderRadius: '16px', padding: '14px 12px', textAlign: 'center' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px', fontWeight: '500' }}>{c.icon} {c.label}</p>
+            <p style={{ fontSize: '16px', fontWeight: '800', color: c.color }}>{c.value.toLocaleString()}</p>
+            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>{activeCurrency}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', background: 'var(--card)', borderRadius: '12px', padding: '4px', marginBottom: '24px', gap: '4px' }}>
+        {['Hammasi', 'Kirim', 'Chiqim', 'Qarz'].map(tab => (
+          <button key={tab} onClick={() => { setActiveTab(tab); setActiveSlice(null); }} style={{
+            flex: 1, textAlign: 'center', padding: '10px 0', fontSize: '13px', fontWeight: '600', borderRadius: '10px', border: 'none', cursor: 'pointer', transition: 'all 0.2s',
+            background: activeTab === tab ? 'var(--bg)' : 'transparent',
+            color: activeTab === tab ? '#fff' : 'var(--text-secondary)',
+            boxShadow: activeTab === tab ? '0 2px 8px rgba(0,0,0,0.2)' : 'none'
+          }}>
+            {tab}
           </button>
         ))}
       </div>
 
-      {/* Top Metrics Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '24px' }}>
-        <div className="stat-card success" style={{ padding: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--success)', marginBottom: '8px' }}>
-            <ArrowDownRight size={16} />
-            <span style={{ fontSize: '13px', fontWeight: 600 }}>Jami Kirim</span>
-          </div>
-          <p style={{ fontSize: '20px', fontWeight: 800 }}>{data.metrics.income.toLocaleString()}</p>
-        </div>
-        
-        <div className="stat-card danger" style={{ padding: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--danger)', marginBottom: '8px' }}>
-            <ArrowUpRight size={16} />
-            <span style={{ fontSize: '13px', fontWeight: 600 }}>Jami Chiqim</span>
-          </div>
-          <p style={{ fontSize: '20px', fontWeight: 800 }}>{data.metrics.expense.toLocaleString()}</p>
-        </div>
-
-        <div className="stat-card" style={{ padding: '16px', gridColumn: 'span 2' }}>
-          <p className="subtitle" style={{ fontSize: '14px', marginBottom: '4px' }}>Sof qoldiq</p>
-          <div className="flex-between">
-            <h2 style={{ fontSize: '28px', fontWeight: 800, color: data.metrics.net >= 0 ? 'var(--success)' : 'var(--danger)' }}>
-              {data.metrics.net > 0 ? '+' : ''}{data.metrics.net.toLocaleString()} <span style={{ fontSize: '16px' }}>{currency}</span>
-            </h2>
-          </div>
-        </div>
-      </div>
-
-      {/* Comparison with Last Month */}
-      <div className="card" style={{ padding: '16px', marginBottom: '24px' }}>
-        <p className="subtitle" style={{ fontSize: '14px', marginBottom: '12px' }}>O'tgan oyga nisbatan</p>
-        <div className="flex-between" style={{ gap: '12px' }}>
-          <div style={{ flex: 1 }}>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Kirim</p>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
-              {data.comparison.incomeDiff > 0 ? <TrendingUp size={16} color="var(--success)" /> : <TrendingDown size={16} color="var(--danger)" />}
-              <span style={{ color: data.comparison.incomeDiff > 0 ? 'var(--success)' : 'var(--danger)', fontWeight: 600 }}>
-                {Math.abs(data.comparison.incomeDiff)}% {data.comparison.incomeDiff > 0 ? 'oshdi' : 'kamaydi'}
-              </span>
-            </div>
-          </div>
-          <div style={{ width: '1px', backgroundColor: 'var(--border)', height: '30px' }}></div>
-          <div style={{ flex: 1 }}>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Chiqim</p>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
-              {data.comparison.expenseDiff > 0 ? <TrendingUp size={16} color="var(--danger)" /> : <TrendingDown size={16} color="var(--success)" />}
-              <span style={{ color: data.comparison.expenseDiff < 0 ? 'var(--success)' : 'var(--danger)', fontWeight: 600 }}>
-                {Math.abs(data.comparison.expenseDiff)}% {data.comparison.expenseDiff > 0 ? 'oshdi' : 'kamaydi'}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="tab-container">
-        {['Hammasi', 'Kirim', 'Chiqim', 'Qarz'].map(t => (
-          <div 
-            key={t} 
-            className={`tab ${tab === t.toLowerCase() ? 'active' : ''}`}
-            onClick={() => setTab(t.toLowerCase())}
-          >
-            {t}
-          </div>
-        ))}
-      </div>
-
-      {/* Interactive Donut Chart */}
-      <div className="card" style={{ padding: '24px 16px' }}>
-        <h2 style={{ fontSize: '18px', fontWeight: '700', marginBottom: '24px' }}>Kategoriyalar ulushi</h2>
-        
-        <div style={{ height: '240px', position: 'relative' }}>
+      {/* Donut Chart */}
+      <div className="card" style={{ padding: '24px', marginBottom: '24px' }}>
+        <div style={{ height: '260px', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={processedPieData}
+                data={finalChartData}
                 innerRadius={70}
-                outerRadius={95}
-                paddingAngle={4}
+                outerRadius={110}
+                paddingAngle={displayEmpty ? 0 : 3}
                 dataKey="value"
                 stroke="none"
-                cornerRadius={4}
+                animationBegin={0}
+                animationDuration={800}
+                animationEasing="ease-out"
+                onClick={(_, idx) => !displayEmpty && setActiveSlice(activeSlice === idx ? null : idx)}
               >
-                {processedPieData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
+                {finalChartData.map((entry, idx) => (
+                  <Cell
+                    key={idx}
+                    fill={entry.color || '#6366F1'}
+                    opacity={activeSlice !== null && activeSlice !== idx ? 0.3 : 1}
+                    style={{ cursor: displayEmpty ? 'default' : 'pointer', transition: 'all 0.3s ease' }}
+                  />
                 ))}
               </Pie>
-              <Tooltip content={<CustomTooltip />} />
             </PieChart>
           </ResponsiveContainer>
-          
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center', width: '120px' }}>
-            <p className="subtitle" style={{ fontSize: '12px' }}>Jami</p>
-            <p style={{ fontWeight: '800', fontSize: '18px', marginTop: '2px' }}>{formatMoney(totalPieValue)}</p>
+
+          {/* Center label or tooltip */}
+          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center', background: 'rgba(0,0,0,0.75)', padding: '12px 16px', borderRadius: '14px', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.08)', minWidth: '120px' }}>
+            {activeSlice !== null && !displayEmpty ? (
+              <>
+                <p style={{ fontSize: '18px', marginBottom: '4px' }}>{finalChartData[activeSlice]?.emoji || '📊'}</p>
+                <p style={{ fontSize: '13px', fontWeight: '700', color: '#fff', marginBottom: '4px' }}>{finalChartData[activeSlice]?.name}</p>
+                <p style={{ fontSize: '14px', fontWeight: '800', color: finalChartData[activeSlice]?.color }}>{finalChartData[activeSlice]?.value?.toLocaleString()} {activeCurrency}</p>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  {legendTotal > 0 ? Math.round((finalChartData[activeSlice]?.value / legendTotal) * 100) : 0}% • {finalChartData[activeSlice]?.count || '–'} ta
+                </p>
+              </>
+            ) : displayEmpty ? (
+              <>
+                <p style={{ fontSize: '28px', marginBottom: '8px', opacity: 0.5 }}>📊</p>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>Tanlangan davrda<br/>ma'lumot yo'q</p>
+              </>
+            ) : (
+              <>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '4px' }}>{centerLabel.label}</p>
+                <p style={{ fontSize: '16px', fontWeight: 'bold', color: '#fff' }}>{centerLabel.value.toLocaleString()} {activeCurrency}</p>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Legend / Breakdown List */}
-        <div style={{ marginTop: '32px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          {processedPieData.map(item => {
-            const percent = ((item.value / totalPieValue) * 100).toFixed(1);
-            return (
-              <div key={item.name}>
-                <div className="flex-between" style={{ marginBottom: '6px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <div style={{ width: '12px', height: '12px', borderRadius: '4px', backgroundColor: item.color }}></div>
-                    <span style={{ fontWeight: 500, fontSize: '14px' }}>{item.name}</span>
-                  </div>
-                  <div style={{ textAlign: 'right' }}>
-                    <span style={{ fontWeight: 700, fontSize: '14px' }}>{formatMoney(item.value)}</span>
-                    <span style={{ color: 'var(--text-secondary)', fontSize: '13px', marginLeft: '8px' }}>{percent}%</span>
+        {/* Legend */}
+        {!displayEmpty && (
+          <div style={{ marginTop: '16px' }}>
+            {displayData.map((item, idx) => {
+              const pct = legendTotal > 0 ? Math.round((item.value / legendTotal) * 100) : 0;
+              return (
+                <div key={idx} onClick={() => setActiveSlice(activeSlice === idx ? null : idx)} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 0', borderBottom: idx < displayData.length - 1 ? '1px solid var(--border)' : 'none', cursor: 'pointer', opacity: activeSlice !== null && activeSlice !== idx ? 0.4 : 1, transition: 'opacity 0.3s' }}>
+                  <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: item.color, flexShrink: 0 }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                      <span style={{ fontSize: '14px', fontWeight: '500' }}>{item.emoji || '●'} {item.name}</span>
+                      <span style={{ fontSize: '14px', fontWeight: '700' }}>{item.value.toLocaleString()} <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{pct}%</span></span>
+                    </div>
+                    <div style={{ height: '4px', borderRadius: '2px', background: 'var(--bg)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, background: item.color, borderRadius: '2px', transition: 'width 0.8s ease' }} />
+                    </div>
                   </div>
                 </div>
-                <div className="progress-bg">
-                  <div className="progress-fill" style={{ width: `${percent}%`, backgroundColor: item.color }}></div>
-                </div>
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Line Chart */}
+      {lineData.length > 1 && (
+        <div className="card" style={{ padding: '20px', marginBottom: '24px' }}>
+          <h3 style={{ fontSize: '16px', fontWeight: '700', marginBottom: '16px' }}>Kunlik dinamika</h3>
+          <div style={{ height: '220px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={lineData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="name" stroke="rgba(255,255,255,0.3)" fontSize={11} tickLine={false} axisLine={false} />
+                <YAxis stroke="rgba(255,255,255,0.3)" fontSize={11} tickLine={false} axisLine={false} tickFormatter={v => v >= 1000000 ? `${(v/1000000).toFixed(1)}M` : v >= 1000 ? `${(v/1000).toFixed(0)}K` : v} />
+                <RTooltip content={<CustomTooltip />} />
+                <Line type="monotone" dataKey="kirim" stroke="#30D158" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: '#30D158', stroke: '#fff', strokeWidth: 2 }} />
+                <Line type="monotone" dataKey="chiqim" stroke="#FF453A" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: '#FF453A', stroke: '#fff', strokeWidth: 2 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '24px', marginTop: '12px' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+              <span style={{ width: '12px', height: '3px', borderRadius: '2px', background: '#30D158' }} /> Kirim
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: 'var(--text-secondary)' }}>
+              <span style={{ width: '12px', height: '3px', borderRadius: '2px', background: '#FF453A' }} /> Chiqim
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Comparison */}
+      <div className="card" style={{ padding: '20px', marginBottom: '24px' }}>
+        <h3 style={{ fontSize: '16px', fontWeight: '700', marginBottom: '16px' }}>O'tgan davr taqqoslash</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+          <div style={{ background: 'rgba(48,209,88,0.08)', border: '1px solid rgba(48,209,88,0.15)', borderRadius: '14px', padding: '16px' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Kirim</p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              {kirimPct >= 0 ? <TrendingUp size={18} color="#30D158" /> : <TrendingDown size={18} color="#FF453A" />}
+              <span style={{ fontSize: '20px', fontWeight: '800', color: kirimPct >= 0 ? '#30D158' : '#FF453A' }}>
+                {kirimPct >= 0 ? '+' : ''}{kirimPct}%
+              </span>
+            </div>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{comparison.kirim.current.toLocaleString()} vs {comparison.kirim.prev.toLocaleString()}</p>
+          </div>
+          <div style={{ background: 'rgba(255,69,58,0.08)', border: '1px solid rgba(255,69,58,0.15)', borderRadius: '14px', padding: '16px' }}>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '8px' }}>Chiqim</p>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              {chiqimPct <= 0 ? <TrendingDown size={18} color="#30D158" /> : <TrendingUp size={18} color="#FF453A" />}
+              <span style={{ fontSize: '20px', fontWeight: '800', color: chiqimPct <= 0 ? '#30D158' : '#FF453A' }}>
+                {chiqimPct >= 0 ? '+' : ''}{chiqimPct}%
+              </span>
+            </div>
+            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{comparison.chiqim.current.toLocaleString()} vs {comparison.chiqim.prev.toLocaleString()}</p>
+          </div>
         </div>
       </div>
 
-      {/* Dynamic Line Chart */}
-      <div className="card" style={{ padding: '24px 16px', marginBottom: '0' }}>
-        <div className="flex-between" style={{ marginBottom: '24px' }}>
-          <h2 style={{ fontSize: '18px', fontWeight: '700' }}>Dinamika</h2>
-          <Activity size={20} color="var(--primary)" />
-        </div>
-        
-        <div style={{ height: '220px', marginLeft: '-15px' }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data.lineData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-              <XAxis 
-                dataKey="name" 
-                stroke="var(--text-secondary)" 
-                tick={{fontSize: 12}} 
-                axisLine={false} 
-                tickLine={false} 
-                dy={10}
-              />
-              <YAxis 
-                stroke="var(--text-secondary)" 
-                tick={{fontSize: 12}} 
-                axisLine={false} 
-                tickLine={false}
-                tickFormatter={(value) => formatMoney(value)}
-              />
-              <Tooltip 
-                contentStyle={{ backgroundColor: 'rgba(28, 28, 30, 0.9)', borderRadius: '12px', border: '1px solid var(--border)' }}
-                itemStyle={{ fontWeight: 'bold' }}
-              />
-              <Line 
-                type="monotone" 
-                dataKey="kirim" 
-                name="Kirim"
-                stroke="var(--success)" 
-                strokeWidth={3} 
-                dot={{ r: 0 }} 
-                activeDot={{ r: 6, strokeWidth: 0 }}
-              />
-              <Line 
-                type="monotone" 
-                dataKey="chiqim" 
-                name="Chiqim"
-                stroke="var(--danger)" 
-                strokeWidth={3} 
-                dot={{ r: 0 }} 
-                activeDot={{ r: 6, strokeWidth: 0 }}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-      
-      {/* Debt summary - only show if all or debt tab is active */}
-      {(tab === 'all' || tab === 'qarz') && (
-        <div className="card" style={{ marginTop: '16px', padding: '20px' }}>
-          <h2 style={{ fontSize: '18px', fontWeight: '700', marginBottom: '16px' }}>Qarzlar hisoboti</h2>
-          <div className="flex-between" style={{ gap: '16px' }}>
-            <div style={{ flex: 1, background: 'rgba(239, 68, 58, 0.1)', padding: '16px', borderRadius: '12px' }}>
-              <p style={{ fontSize: '13px', color: 'var(--danger)', fontWeight: 600 }}>Berishim kerak</p>
-              <p style={{ fontWeight: '800', fontSize: '18px', marginTop: '6px' }}>{formatMoney(data.metrics.debtGive)}</p>
+      {/* Date Modal */}
+      {dateModal && (
+        <div className="modal-overlay" onClick={() => setDateModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="flex-between" style={{ marginBottom: '24px' }}>
+              <h3 style={{ fontSize: '20px', fontWeight: 'bold' }}>Davrni tanlang</h3>
+              <button onClick={() => setDateModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-secondary)' }}><X size={20} /></button>
             </div>
-            <div style={{ flex: 1, background: 'rgba(48, 209, 88, 0.1)', padding: '16px', borderRadius: '12px' }}>
-              <p style={{ fontSize: '13px', color: 'var(--success)', fontWeight: 600 }}>Olishim kerak</p>
-              <p style={{ fontWeight: '800', fontSize: '18px', marginTop: '6px' }}>{formatMoney(data.metrics.debtTake)}</p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px' }}>
+              <div style={{ background: 'var(--bg)', padding: '12px', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Boshlang'ich</p>
+                <input type="date" value={fmtDateApi(dateRange.start)} onChange={e => setDateRange(p => ({...p, start: new Date(e.target.value)}))} style={{ width: '100%', background: 'transparent', border: 'none', color: '#fff', fontSize: '14px', fontWeight: '600', outline: 'none' }} />
+              </div>
+              <div style={{ background: 'var(--bg)', padding: '12px', borderRadius: '12px', border: '1px solid var(--border)' }}>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' }}>Yakuniy</p>
+                <input type="date" value={fmtDateApi(dateRange.end)} onChange={e => setDateRange(p => ({...p, end: new Date(e.target.value)}))} style={{ width: '100%', background: 'transparent', border: 'none', color: '#fff', fontSize: '14px', fontWeight: '600', outline: 'none' }} />
+              </div>
             </div>
+
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '24px' }}>
+              {[{l: 'Bugungi kun', k: 'today'}, {l: 'Hafta', k: 'week'}, {l: "O'tgan oy", k: 'lastMonth'}].map(p => (
+                <button key={p.k} onClick={() => setPreset(p.k)} style={{ flex: 1, padding: '10px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-primary)', fontSize: '13px', fontWeight: '500', cursor: 'pointer' }}>{p.l}</button>
+              ))}
+            </div>
+
+            <button onClick={() => setDateModal(false)} style={{ width: '100%', padding: '14px', background: 'var(--primary)', color: '#fff', border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer' }}>Qo'llash</button>
           </div>
         </div>
       )}

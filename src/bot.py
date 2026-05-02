@@ -11,12 +11,15 @@ Wires together:
 - voice_handler       (voice messages → Whisper → text pipeline)
 - message_handler     (text messages → AI → transaction pipeline) ← LAST (catch-all)
 - scheduler           (daily/monthly reminders + dynamic one-time reminders)
+- Global error handler for unhandled exceptions
 """
 
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand, ErrorEvent
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter
 from src.config import BOT_TOKEN
 from src.handlers import (
     start_handler,
@@ -27,10 +30,15 @@ from src.handlers import (
     message_handler,
     admin_handler,
     export_handler,
+    group_handler,
 )
+from src.middlewares.antispam import AntiSpamMiddleware
 from src.middlewares.subscription import SubscriptionMiddleware
 from src.services.scheduler import setup_scheduler
 from src.api import start_api_server
+from src.services.error_handler import (
+    log_error, handle_error, ErrorType, split_long_message
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,7 +51,103 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
+    # ── Global error handler ──
+    @dp.errors()
+    async def global_error_handler(event: ErrorEvent):
+        """Catch all unhandled errors in handlers."""
+        exception = event.exception
+        update = event.update
+
+        # Extract user_id from update if possible
+        user_id = 0
+        if update and update.message:
+            user_id = update.message.from_user.id if update.message.from_user else 0
+        elif update and update.callback_query:
+            user_id = update.callback_query.from_user.id if update.callback_query.from_user else 0
+
+        # ── User blocked the bot ──
+        if isinstance(exception, TelegramForbiddenError):
+            log_error(ErrorType.TELEGRAM_BLOCKED, f"User {user_id} blocked the bot", user_id, exception)
+            if user_id:
+                try:
+                    from src.database import users_collection
+                    await users_collection.update_one(
+                        {"telegram_id": user_id},
+                        {"$set": {"is_active": False}}
+                    )
+                except Exception:
+                    pass
+            return True  # Error handled
+
+        # ── Message too long ──
+        if isinstance(exception, TelegramBadRequest) and "message is too long" in str(exception).lower():
+            log_error(ErrorType.TELEGRAM_MESSAGE_TOO_LONG, f"Message too long for {user_id}", user_id, exception)
+            # Try to send truncated version
+            if update and update.message:
+                try:
+                    await update.message.answer("⚠️ Xabar juda uzun. Qisqaroq formatda ko'rsatildi.")
+                except Exception:
+                    pass
+            return True
+
+        # ── Flood limit (429) ──
+        if isinstance(exception, TelegramRetryAfter):
+            log_error(ErrorType.TELEGRAM_GENERAL, f"Global rate limit. Wait {exception.retry_after}s", user_id, exception)
+            # For specific safe_send_message we handle it there, but if it hits here:
+            if update and update.message:
+                try:
+                    import asyncio
+                    await asyncio.sleep(exception.retry_after)
+                    await update.message.answer("⏳ Bot qayta tiklandi.")
+                except Exception:
+                    pass
+            return True
+
+        # ── MongoDB connection errors ──
+        error_str = str(exception).lower()
+        if "serverselectiontimeouterror" in error_str or "connection" in error_str and "mongo" in error_str:
+            log_error(ErrorType.MONGODB_CONNECTION, f"MongoDB connection error", user_id, exception)
+            await handle_error(bot, ErrorType.MONGODB_CONNECTION, str(exception), user_id, exception)
+            if update and update.message:
+                try:
+                    from src.services.i18n import t
+                    from src.database import get_user
+                    user = await get_user(user_id) if user_id else {}
+                    lang = user.get("language", "uz") if user else "uz"
+                    await update.message.answer(t(lang, "err_db_connection"))
+                except Exception:
+                    try:
+                        await update.message.answer("⚠️ Texnik muammo. Jamoamiz xabardor qilindi.")
+                    except Exception:
+                        pass
+            return True
+
+        # ── All other unhandled errors ──
+        log_error(ErrorType.UNKNOWN, f"Unhandled error: {type(exception).__name__}: {str(exception)}", user_id, exception)
+        logger.exception(f"Unhandled error in bot:", exc_info=exception)
+
+        # Try to notify user
+        if update and update.message and user_id:
+            try:
+                from src.services.i18n import t
+                from src.database import get_user
+                user = await get_user(user_id) if user_id else {}
+                lang = user.get("language", "uz") if user else "uz"
+                await update.message.answer(t(lang, "err_general"))
+            except Exception:
+                pass
+
+        # Alert admin for unknown errors
+        try:
+            await handle_error(bot, ErrorType.UNKNOWN, f"{type(exception).__name__}: {str(exception)[:500]}", user_id, exception)
+        except Exception:
+            pass
+
+        return True
+
     # ── Register middleware ──
+    dp.message.middleware(AntiSpamMiddleware())
+    dp.callback_query.middleware(AntiSpamMiddleware())
     dp.message.middleware(SubscriptionMiddleware())
     dp.callback_query.middleware(SubscriptionMiddleware())
 
@@ -56,6 +160,7 @@ async def main():
     dp.include_router(export_handler.router)        # /excel
     dp.include_router(limit_handler.router)         # /setlimit
     dp.include_router(menu_handler.router)          # main reply keyboard menus
+    dp.include_router(group_handler.router)          # group messages (before catch-all)
     dp.include_router(voice_handler.router)         # voice messages
     dp.include_router(message_handler.router)       # text messages (catch-all — MUST be last)
 
@@ -63,10 +168,15 @@ async def main():
     setup_scheduler(bot)
 
     # ── Start API Server ──
-    await start_api_server()
+    await start_api_server(bot)
 
     # ── Start polling ──
     logger.info("🚀 Somly AI Bot ishga tushdi!")
+    await bot.set_my_commands([
+        BotCommand(command="language", description="Tilni o'zgartirish"),
+        BotCommand(command="setlimit", description="Oylik limit o'rnatish"),
+        BotCommand(command="excel", description="Hisobotni yuklab olish"),
+    ])
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

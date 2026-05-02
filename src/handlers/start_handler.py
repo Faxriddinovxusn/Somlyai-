@@ -8,125 +8,23 @@ Flow:
 """
 
 from aiogram import Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from src.database import get_user, is_admin, update_user_language
 from src.states import RegistrationStates
+from src.services.i18n import t
 
 router = Router()
-
-# ═══════════════════════════════════════
-# TRANSLATIONS
-# ═══════════════════════════════════════
-TEXTS = {
-    "uz": {
-        "welcome_new": (
-            "✨ Assalomu aleykum!\n\n"
-            "Men <b>Somly AI</b> man — sizning shaxsiy moliya yordamchingiz 💰\n\n"
-            "Meni ishlatish pullik bo'lishi mumkin edi, lekin @XusniddinWR tomonidan "
-            "men <b>bepul</b> qilindim! 🎉\n\n"
-            "🔒 Sizning ma'lumotlaringiz bizda saqlanmaydi!\n\n"
-            "Sizdan shunchaki bot talab qiladigan kanallarga obuna bo'lish talab etiladi.\n\n"
-            "Ishlaringizga omad! 💪"
-        ),
-        "welcome_back": "👋 Qaytganingiz bilan, {name}! Bugun nimalarga xarajat qildingiz?",
-        "ask_name": "🤝 Keling tanishib olamiz!\n\nIsmingizni kiriting (matn yoki ovozli):",
-        "ask_contact": (
-            "{name}, keling ro'yxatdan o'tib olamiz! 📱\n\n"
-            "Raqamingizni pastdagi tugma orqali yuboring 👇"
-        ),
-        "contact_required": "📱 Ro'yxatdan o'tish uchun raqamingizni pastdagi tugma orqali yuboring!",
-        "share_contact_btn": "📱 Raqamni yuborish",
-        "registration_done": (
-            "✅ Ajoyib, {name}! Ro'yxatdan o'tdingiz!\n\n"
-            "Endi quyidagi xarajatni audio yoki matn ko'rinishida yuboring:\n\n"
-            "Masalan: \"Fastfoodga 15,000 so'm xarajat qildim\" 💸"
-        ),
-        "commands": (
-            "📌 Buyruqlar:\n"
-            "/setlimit — Oylik limit\n"
-            "/excel — Hisobot yuklash\n"
-            "/language — Tilni o'zgartirish\n"
-            "/help — Yordam"
-        ),
-    },
-    "en": {
-        "welcome_new": (
-            "✨ Hello!\n\n"
-            "I am <b>Somly AI</b> — your personal finance assistant 💰\n\n"
-            "Using me could have been paid, but @XusniddinWR made me "
-            "<b>free</b>! 🎉\n\n"
-            "🔒 Your data is not stored with us!\n\n"
-            "You just need to subscribe to the required channels.\n\n"
-            "Good luck! 💪"
-        ),
-        "welcome_back": "👋 Welcome back, {name}! What did you spend today?",
-        "ask_name": "🤝 Let's get to know each other!\n\nPlease enter your name (text or voice):",
-        "ask_contact": (
-            "{name}, let's complete registration! 📱\n\n"
-            "Share your phone number using the button below 👇"
-        ),
-        "contact_required": "📱 To register, please share your phone number using the button below!",
-        "share_contact_btn": "📱 Share phone number",
-        "registration_done": (
-            "✅ Great, {name}! You're registered!\n\n"
-            "Now send your expense as text or audio:\n\n"
-            "Example: \"Spent 15,000 on fast food\" 💸"
-        ),
-        "commands": (
-            "📌 Commands:\n"
-            "/setlimit — Monthly limit\n"
-            "/excel — Download report\n"
-            "/language — Change language\n"
-            "/help — Help"
-        ),
-    },
-    "ru": {
-        "welcome_new": (
-            "✨ Здравствуйте!\n\n"
-            "Я <b>Somly AI</b> — ваш личный финансовый помощник 💰\n\n"
-            "Мое использование могло быть платным, но @XusniddinWR сделал меня "
-            "<b>бесплатным</b>! 🎉\n\n"
-            "🔒 Ваши данные у нас не хранятся!\n\n"
-            "От вас требуется лишь подписка на каналы бота.\n\n"
-            "Удачи! 💪"
-        ),
-        "welcome_back": "👋 С возвращением, {name}! На что вы сегодня потратились?",
-        "ask_name": "🤝 Давайте познакомимся!\n\nВведите ваше имя (текст или голосовое):",
-        "ask_contact": (
-            "{name}, давайте завершим регистрацию! 📱\n\n"
-            "Отправьте свой номер телефона кнопкой ниже 👇"
-        ),
-        "contact_required": "📱 Для регистрации отправьте номер телефона кнопкой ниже!",
-        "share_contact_btn": "📱 Отправить номер",
-        "registration_done": (
-            "✅ Отлично, {name}! Вы зарегистрированы!\n\n"
-            "Теперь отправьте расход текстом или голосом:\n\n"
-            "Например: \"Потратил 15 000 на фастфуд\" 💸"
-        ),
-        "commands": (
-            "📌 Команды:\n"
-            "/setlimit — Ежемесячный лимит\n"
-            "/excel — Скачать отчет\n"
-            "/language — Изменить язык\n"
-            "/help — Помощь"
-        ),
-    },
-}
-
-def t(lang: str, key: str, **kwargs) -> str:
-    text = TEXTS.get(lang, TEXTS["uz"]).get(key, TEXTS["uz"][key])
-    if kwargs:
-        text = text.format(**kwargs)
-    return text
 
 
 def get_language_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇺🇿 O'zbekcha", callback_data="lang_uz")],
-        [InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en")],
-        [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru")]
+        [
+            InlineKeyboardButton(text="🇺🇿 O'zbek", callback_data="lang_uz"),
+            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru"),
+            InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en")
+        ]
     ])
 
 
@@ -134,9 +32,18 @@ def get_language_keyboard() -> InlineKeyboardMarkup:
 # /start
 # ═══════════════════════════════════════
 @router.message(Command("start"))
-async def start_command(message: Message, state: FSMContext):
+async def start_command(message: Message, command: CommandObject, state: FSMContext):
     user_id = message.from_user.id
     user = await get_user(user_id)
+    
+    # Referral code handling
+    if command.args and command.args.startswith("ref_"):
+        try:
+            referrer_id = int(command.args.split("_")[1])
+            if referrer_id != user_id:
+                await state.update_data(referrer_id=referrer_id)
+        except (ValueError, IndexError):
+            pass
 
     # Agar eski user bo'lsa va ro'yxatdan o'tgan bo'lsa
     if user.get("registration_complete"):
@@ -146,16 +53,53 @@ async def start_command(message: Message, state: FSMContext):
         name = user.get("full_name", "")
         text = t(lang, "welcome_back", name=name)
         text += "\n\n" + t(lang, "commands")
-        if await is_admin(user_id):
-            text += "\n\n🛠 ADMIN: /stats, /add_channel, /remove_channel, /admin, /remove_admin, /send, /setwebapp"
         await message.answer(text, reply_markup=kbd)
+        
+        # Admin uchun to'liq buyruqlar paneli
+        if await is_admin(user_id):
+            admin_text = (
+                "🛠 <b>ADMIN PANEL — Barcha buyruqlar:</b>\n\n"
+                
+                "📊 <b>Statistika va Monitoring:</b>\n"
+                "├ /stats — Bot statistikasi (foydalanuvchilar, tranzaksiyalar)\n"
+                "├ /user [id] — Foydalanuvchi ma'lumotlari\n"
+                "└ /web — Admin veb-panel kirish ma'lumotlari\n\n"
+                
+                "👥 <b>Foydalanuvchi boshqaruvi:</b>\n"
+                "├ /admin [id] — Yangi admin qo'shish\n"
+                "├ /remove_admin [id] — Adminlikdan o'chirish\n"
+                "├ /ban [id] — Qora ro'yxatga kiritish\n"
+                "└ /unban [id] — Qora ro'yxatdan chiqarish\n\n"
+                
+                "📢 <b>Kanallar boshqaruvi:</b>\n"
+                "├ /channels — Barcha kanallar ro'yxati\n"
+                "├ /add_channel — Yangi kanal qo'shish\n"
+                "├ /change_channel — Kanalni o'zgartirish\n"
+                "├ /setchannel [#] [@link] — Tezkor o'zgartirish\n"
+                "└ /remove_channel [link] — Kanalni o'chirish\n\n"
+                
+                "📣 <b>Xabar tarqatish:</b>\n"
+                "└ /send — Barcha foydalanuvchilarga xabar yuborish\n\n"
+                
+                "🌐 <b>Web App:</b>\n"
+                "└ /setwebapp [link] — Mini App URL o'rnatish\n\n"
+                
+                "🧠 <b>AI Bilimlar bazasi:</b>\n"
+                "├ /teach [mavzu]: [matn] — Yangi bilim qo'shish\n"
+                "├ /knowledge — Barcha bilimlar ro'yxati\n"
+                "├ /editteach [mavzu]: [matn] — Bilimni tahrirlash\n"
+                "└ /unteach [mavzu] — Bilimni o'chirish (arxivlash)\n\n"
+                
+                "🔧 <b>Tizim:</b>\n"
+                "└ /language — Tilni o'zgartirish"
+            )
+            await message.answer(admin_text, parse_mode="HTML")
         return
 
     # Yangi user — til tanlash
+    lang = user.get("language", "uz")
     await message.answer(
-        "🌍 Iltimos, tilni tanlang:\n"
-        "Please select your language:\n"
-        "Пожалуйста, выберите язык:",
+        t(lang, "choose_lang"),
         reply_markup=get_language_keyboard()
     )
 
@@ -165,8 +109,10 @@ async def start_command(message: Message, state: FSMContext):
 # ═══════════════════════════════════════
 @router.message(Command("language"))
 async def language_command(message: Message):
+    user = await get_user(message.from_user.id)
+    lang = user.get("language", "uz")
     await message.answer(
-        "🌍 Tilni tanlang / Select language / Выберите язык:",
+        t(lang, "choose_lang"),
         reply_markup=get_language_keyboard()
     )
 
@@ -187,12 +133,8 @@ async def process_language_selection(callback_query: CallbackQuery, state: FSMCo
     if user.get("registration_complete"):
         from src.handlers.menu_handler import get_main_keyboard
         kbd = await get_main_keyboard()
-        lang_msg = {
-            "uz": "✅ Til o'zgartirildi",
-            "en": "✅ Language changed",
-            "ru": "✅ Язык изменен"
-        }
-        await callback_query.message.answer(lang_msg.get(lang_code, "✅ Til o'zgartirildi"), reply_markup=kbd)
+        lang_msg = t(lang_code, "lang_changed")
+        await callback_query.message.answer(lang_msg, reply_markup=kbd)
         await callback_query.answer()
         return
 
@@ -220,56 +162,4 @@ async def process_language_selection(callback_query: CallbackQuery, state: FSMCo
     await callback_query.answer()
 
 
-# ═══════════════════════════════════════
-# /help
-# ═══════════════════════════════════════
-@router.message(Command("help"))
-async def help_command(message: Message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    lang = user.get("language", "uz")
 
-    if lang == "en":
-        help_text = (
-            "📚 Somly AI Help\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "💬 SEND A MESSAGE:\n"
-            "Write any financial message — AI analyzes it automatically.\n\n"
-            "Examples:\n"
-            "  💸 «Spent 45k on food»\n"
-            "  💰 «Received 4M salary»\n"
-            "  🤝 «Lent 100k to Jasur»\n"
-            "  🎤 You can also send voice messages\n\n"
-            + t(lang, "commands")
-        )
-    elif lang == "ru":
-        help_text = (
-            "📚 Помощь Somly AI\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "💬 ОТПРАВЬТЕ СООБЩЕНИЕ:\n"
-            "Напишите любое финансовое сообщение — ИИ проанализирует автоматически.\n\n"
-            "Примеры:\n"
-            "  💸 «Потратил 45 тысяч на еду»\n"
-            "  💰 «Получил зарплату 4 млн»\n"
-            "  🤝 «Дал в долг 100 тысяч Жасуру»\n"
-            "  🎤 Можно отправить голосовое сообщение\n\n"
-            + t(lang, "commands")
-        )
-    else:
-        help_text = (
-            "📚 Somly AI Yordam\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            "💬 XABAR YUBORING:\n"
-            "Istalgan moliyaviy xabar yozing — AI uni tahlil qiladi.\n\n"
-            "Misollar:\n"
-            "  💸 «Ovqatga 45 ming berdim»\n"
-            "  💰 «Oylik 4 mln tushdi»\n"
-            "  🤝 «Jasurga 100 ming qarz berdim»\n"
-            "  🎤 Ovozli xabar yuborishingiz mumkin\n\n"
-            + t(lang, "commands")
-        )
-
-    if await is_admin(user_id):
-        help_text += "\n\n🛠 ADMIN: /stats, /add_channel, /remove_channel, /admin, /remove_admin, /send, /setwebapp"
-
-    await message.answer(help_text)
