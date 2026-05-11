@@ -22,7 +22,54 @@ import PrivacyPage from './pages/Privacy';
 import { wsService } from './utils/websocket';
 import { fetchApi } from './utils/api';
 import { useTranslation } from 'react-i18next';
-import somlyLogo from './somly.jpg';
+
+import AdminApp from './admin/AdminApp';
+
+const AppContent = ({ initData, isOffline, wasOffline, isSyncing }) => {
+  const location = useLocation();
+  const isAdmin = location.pathname.startsWith('/admin');
+
+  if (isAdmin) {
+    return <AdminApp />;
+  }
+
+  return (
+    <div className="app-wrapper">
+      <Sidebar />
+      
+      <div className="app-container">
+        {/* Status Banners */}
+        {isOffline && <OfflineBanner />}
+        {wasOffline && !isOffline && (
+          <div className="status-banner" style={{ background: isSyncing ? 'var(--warning)' : 'var(--success)' }}>
+            {isSyncing ? <RefreshCw size={18} className="spin-animation" /> : <Wifi size={18} />}
+            <span>{isSyncing ? "Yangilanmoqda..." : "Yangilandi"}</span>
+          </div>
+        )}
+
+        <div className="main-content-scroll">
+          <Routes>
+            <Route path="/" element={<DashboardPage initData={initData} />} />
+            <Route path="/balances" element={<BalancesPage initData={initData} />} />
+            <Route path="/stats" element={<StatisticsPage initData={initData} />} />
+            <Route path="/reports" element={<ReportsPage initData={initData} />} />
+            <Route path="/categories" element={<CategoriesPage initData={initData} />} />
+            <Route path="/profile" element={<ProfilePage initData={initData} />} />
+            <Route path="/debts" element={<DebtsPage initData={initData} />} />
+            <Route path="/reminders" element={<RemindersPage initData={initData} />} />
+            <Route path="/analytics" element={<AnalyticsPage initData={initData} />} />
+            <Route path="/group" element={<GroupPage initData={initData} />} />
+            <Route path="/settings" element={<SettingsPage initData={initData} />} />
+            <Route path="/notifications" element={<NotificationsPage initData={initData} />} />
+            <Route path="/privacy" element={<PrivacyPage />} />
+          </Routes>
+        </div>
+
+        <BottomNav />
+      </div>
+    </div>
+  );
+};
 
 const App = () => {
   const [initData, setInitData] = useState('');
@@ -116,40 +163,7 @@ const App = () => {
 
   return (
     <BrowserRouter>
-      <div className="app-wrapper">
-        <Sidebar />
-        
-        <div className="app-container">
-          {/* Status Banners */}
-          {isOffline && <OfflineBanner />}
-          {wasOffline && !isOffline && (
-            <div className="status-banner" style={{ background: isSyncing ? 'var(--warning)' : 'var(--success)' }}>
-              {isSyncing ? <RefreshCw size={18} className="spin-animation" /> : <Wifi size={18} />}
-              <span>{isSyncing ? "Yangilanmoqda..." : "Yangilandi"}</span>
-            </div>
-          )}
-
-          <div className="main-content-scroll">
-            <Routes>
-              <Route path="/" element={<DashboardPage initData={initData} />} />
-              <Route path="/balances" element={<BalancesPage initData={initData} />} />
-              <Route path="/stats" element={<StatisticsPage initData={initData} />} />
-              <Route path="/reports" element={<ReportsPage initData={initData} />} />
-              <Route path="/categories" element={<CategoriesPage initData={initData} />} />
-              <Route path="/profile" element={<ProfilePage initData={initData} />} />
-              <Route path="/debts" element={<DebtsPage initData={initData} />} />
-              <Route path="/reminders" element={<RemindersPage initData={initData} />} />
-              <Route path="/analytics" element={<AnalyticsPage initData={initData} />} />
-              <Route path="/group" element={<GroupPage initData={initData} />} />
-              <Route path="/settings" element={<SettingsPage initData={initData} />} />
-              <Route path="/notifications" element={<NotificationsPage initData={initData} />} />
-              <Route path="/privacy" element={<PrivacyPage />} />
-            </Routes>
-          </div>
-
-          <BottomNav />
-        </div>
-      </div>
+      <AppContent initData={initData} isOffline={isOffline} wasOffline={wasOffline} isSyncing={isSyncing} />
     </BrowserRouter>
   );
 };
@@ -162,7 +176,7 @@ const Sidebar = () => {
     <div className="sidebar">
       <div style={{ padding: '20px', display: 'flex', alignItems: 'center', gap: '12px' }}>
         <div style={{ width: 32, height: 32, borderRadius: '8px', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <img src={somlyLogo} alt="Somly AI Logo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          <img src="/somly.jpg" alt="Somly AI Logo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
         </div>
         <h2 style={{ fontSize: '18px', margin: 0, fontWeight: 700 }}>Somly AI</h2>
       </div>
@@ -181,13 +195,15 @@ const Sidebar = () => {
         <NavItem to="/group" icon={<Users size={18} />} label="Telegram guruh" active={location.pathname === '/group'} />
       </div>
 
-      <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }} className="clickable">
-        <div style={{ width: 36, height: 36, background: '#3B82F6', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold' }}>H</div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: '14px', fontWeight: 600 }}>Husniddin</div>
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Profil</div>
+      <Link to="/profile" style={{ textDecoration: 'none', color: 'inherit' }}>
+        <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer' }} className="clickable">
+          <div style={{ width: 36, height: 36, background: '#3B82F6', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 'bold' }}>H</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: '14px', fontWeight: 600 }}>Husniddin</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Profil</div>
+          </div>
         </div>
-      </div>
+      </Link>
     </div>
   );
 };

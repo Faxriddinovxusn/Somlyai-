@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, MoreVertical, Calendar, ChevronRight, X, Check, Clock, Trash2, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { fetchApi, showToast } from '../utils/api';
@@ -310,8 +311,8 @@ const DebtsPage = ({ initData }) => {
       </div>
 
       {/* Action Modal */}
-      {activeModal === 'action' && selectedDebt && (
-        <div className="modal-overlay" onClick={() => setActiveModal(null)}>
+      {activeModal === 'action' && selectedDebt && createPortal(
+        <div className="modal-overlay" onClick={() => setActiveModal(null)} style={{ zIndex: 9999 }}>
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{ paddingBottom: '30px' }}>
             <div className="flex-between" style={{ marginBottom: '24px' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -351,12 +352,13 @@ const DebtsPage = ({ initData }) => {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Date Picker Modal (Simulation) */}
-      {activeModal === 'date' && (
-        <div className="modal-overlay" onClick={() => setActiveModal('action')}>
+      {activeModal === 'date' && createPortal(
+        <div className="modal-overlay" onClick={() => setActiveModal('action')} style={{ zIndex: 9999 }}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <h3 style={{ fontSize: '20px', fontWeight: 'bold', marginBottom: '20px', textAlign: 'center' }}>Muddatni tanlang</h3>
             <input type="date" style={{ width: '100%', padding: '16px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '12px', color: '#FFF', fontSize: '18px', outline: 'none', marginBottom: '24px' }} defaultValue={selectedDebt?.due_date || selectedDebt?.date?.split('T')[0]} />
@@ -364,7 +366,8 @@ const DebtsPage = ({ initData }) => {
               Saqlash
             </button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

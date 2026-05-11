@@ -7,11 +7,15 @@ from aiogram.fsm.state import State, StatesGroup
 
 class RegistrationStates(StatesGroup):
     waiting_for_name = State()
+    waiting_for_contact = State()
+    # Legacy states (kept for backward compatibility, used in segment questions later)
     waiting_for_age = State()
     waiting_for_location = State()
     waiting_for_region = State()
     waiting_for_country = State()
-    waiting_for_contact = State()
+
+class SegmentationStates(StatesGroup):
+    waiting_for_country_name = State()
 
 class ExportStates(StatesGroup):
     waiting_for_custom_date = State()

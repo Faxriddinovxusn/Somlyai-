@@ -186,7 +186,11 @@ const DashboardPage = ({ initData }) => {
 
       {/* MOBILE PROFILE HEADER (Hidden on desktop since sidebar has it) */}
       <div className="mobile-header flex-between" style={{ marginBottom: '24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <div 
+          onClick={() => navigate('/profile')} 
+          className="clickable" 
+          style={{ display: 'flex', alignItems: 'center', gap: '12px', cursor: 'pointer', padding: '4px', borderRadius: '12px', background: 'rgba(255,255,255,0.02)' }}
+        >
           <div style={{ width: 44, height: 44, borderRadius: '12px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
             <img src="/somly.jpg" alt="Somly AI" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           </div>
@@ -362,7 +366,15 @@ const DashboardPage = ({ initData }) => {
         <div style={{ height: '240px', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
-              <Pie data={chartData} innerRadius={60} outerRadius={100} paddingAngle={0} dataKey="value" stroke="none">
+              <Pie 
+                data={chartData} 
+                innerRadius={65} 
+                outerRadius={100} 
+                paddingAngle={4} 
+                cornerRadius={10} 
+                dataKey="value" 
+                stroke="none"
+              >
                 {chartData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={entry.color || '#6366F1'} />
                 ))}

@@ -24,8 +24,10 @@ from src.config import BOT_TOKEN
 from src.handlers import (
     start_handler,
     registration_handler,
+    segment_handler,
     limit_handler,
     menu_handler,
+    photo_handler,
     voice_handler,
     message_handler,
     admin_handler,
@@ -157,10 +159,12 @@ async def main():
     dp.include_router(admin_handler.router)         # /stats, /admin, /add_channel, /send
     dp.include_router(start_handler.router)         # /start, /help, /language + lang_ callbacks
     dp.include_router(registration_handler.router)  # FSM: name + contact
+    dp.include_router(segment_handler.router)       # Segmentation questions + interests
     dp.include_router(export_handler.router)        # /excel
     dp.include_router(limit_handler.router)         # /setlimit
     dp.include_router(menu_handler.router)          # main reply keyboard menus
     dp.include_router(group_handler.router)          # group messages (before catch-all)
+    dp.include_router(photo_handler.router)           # photo messages (QR scan)
     dp.include_router(voice_handler.router)         # voice messages
     dp.include_router(message_handler.router)       # text messages (catch-all — MUST be last)
 

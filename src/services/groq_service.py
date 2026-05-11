@@ -166,6 +166,57 @@ class GroqService:
         
         raise GroqQueueError("All API keys exhausted after max retries")
 
+    async def stream_chat_completion_with_retry(self, messages: List[Dict], **kwargs):
+        attempts = 0
+        max_retries = len(self.keys_stats) * 2
+
+        while attempts < max_retries:
+            try:
+                ks = self.get_best_key()
+            except GroqQueueError:
+                yield "Xatolik: Barcha API kalitlar band yoki limit tugagan."
+                return
+
+            try:
+                stream = await ks.client.chat.completions.create(
+                    messages=messages,
+                    model=GROQ_MODEL,
+                    stream=True,
+                    **kwargs
+                )
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+                ks.requests_count += 1
+                ks.connection_errors = 0
+                return
+            except APIStatusError as e:
+                status_code = getattr(e, 'status_code', 0)
+                error_str = str(e)
+                logger.error(f"Groq Stream Error (key {ks.index+1}): {error_str}")
+
+                if status_code == 429 or "rate" in error_str.lower() or status_code == 403:
+                    ks.status = "cooling"
+                    ks.last_error_time = time.time()
+                elif status_code == 401 or "invalid_api_key" in error_str.lower():
+                    ks.status = "exhausted"
+                    ks.last_error_time = time.time()
+                elif "quota" in error_str.lower():
+                    ks.status = "exhausted"
+                    ks.last_error_time = time.time()
+                elif status_code >= 500:
+                    pass
+            except (APITimeoutError, APIConnectionError) as e:
+                ks.connection_errors += 1
+                if ks.connection_errors >= 3:
+                    ks.status = "cooling"
+                    ks.last_error_time = time.time()
+                
+            attempts += 1
+            await asyncio.sleep(1) # wait before retry
+        
+        yield "Xatolik: Tizim hozircha javob bera olmaydi (max retries)."
+
     async def transcribe_audio_with_retry(self, file_path: str) -> str:
         attempts = 0
         max_retries = len(self.keys_stats) * 2
@@ -243,6 +294,44 @@ class GroqService:
             return transcribed_text.strip()
 
     # ═══════════════════════════════════════
+    # JINSNI ANIQLASH (AI orqali)
+    # ═══════════════════════════════════════
+    async def detect_gender(self, name: str) -> str:
+        """
+        Ism orqali jinsni aniqlaydi.
+        Qaytaradi: 'male', 'female', yoki 'unknown'
+        """
+        if not name or len(name) < 2:
+            return "unknown"
+            
+        messages = [
+            {"role": "system", "content": (
+                "Quyidagi ismning jinsini aniqla. O'zbek, rus, ingliz va boshqa millat ismlari bo'lishi mumkin. "
+                "Faqat: male, female, yoki unknown qaytargin. Boshqa narsa yozma. "
+                "Misol uchun: "
+                "Sherzod -> male, "
+                "Malika -> female, "
+                "Alex -> unknown, "
+                "Dana -> unknown."
+            )},
+            {"role": "user", "content": name}
+        ]
+        
+        try:
+            result = await self.chat_completion_with_retry(
+                messages, temperature=0.1, max_tokens=10
+            )
+            result = result.strip().lower().strip('"').strip("'").strip(".")
+            if "male" in result and "female" not in result:
+                return "male"
+            elif "female" in result:
+                return "female"
+            return "unknown"
+        except Exception as e:
+            logger.error(f"Error detecting gender for '{name}': {e}")
+            return "unknown"
+
+    # ═══════════════════════════════════════
     # ASOSIY TRANZAKSIYA TAHLILI
     # ═══════════════════════════════════════
     async def parse_transaction(self, text: str, current_date_str: str, language: str = "uz", custom_categories: list = None, user_id: int = 0, user_context: dict = None, recent_txs: str = "", habits: dict = None, all_balances: list = None, chat_history: list = None) -> Dict[str, Any]:
@@ -258,7 +347,7 @@ class GroqService:
         tomorrow = (today + timedelta(days=1)).strftime("%Y-%m-%d")
         current_time = datetime.now().strftime("%H:%M")
 
-        balances_text = ", ".join(all_balances) if all_balances else "So'm, Humo"
+        balances_text = ", ".join(all_balances) if all_balances else "So'm, Dollar"
 
         # Kechagi va ertangi sanani hisoblash
         today = datetime.strptime(current_date_str, "%Y-%m-%d")
@@ -275,12 +364,14 @@ class GroqService:
         
         context_text = ""
         if user_context:
+            monthly_limit = user_context.get('monthly_limit') or 0
+            monthly_expense = user_context.get('monthly_expense') or 0
             context_text = f"""
 FOYDALANUVCHI KONTEKSTI:
-- Ism: {user_context.get("full_name", "Noma'lum")}
-- Asosiy valyuta: {user_context.get('main_currency', 'UZS')}
-- Oylik limit: {user_context.get('monthly_limit', 0):,}
-- Bu oydagi xarajat: {user_context.get('monthly_expense', 0):,}
+- Ism: {user_context.get("full_name", "Noma'lum") or "Noma'lum"}
+- Asosiy valyuta: {user_context.get('main_currency') or 'UZS'}
+- Oylik limit: {monthly_limit:,}
+- Bu oydagi xarajat: {monthly_expense:,}
 - Mavjud balanslar: {balances_text}
 - Kategoriya odatlari: {recent_txs}
 """
@@ -327,8 +418,6 @@ Har xabar kelganda AVVAL niyatni aniqla:
 3. BOT HAQIDA SAVOL → o'zini tanishtirish (intent="bot_about")
 4. ODDIY SUHBAT → suhbat + yo'naltirish (intent="chat")
 5. MAXFIY SAVOL → himoya javobi (intent="secret")
-6. MOLIYAVIY MASLAHAT → maslahat berish (intent="advice")
-7. NEGA BEPUL SAVOLI → intent="chat", maxsus javob
 
 ═══════════════════════════════════════
 QISM 2 — BOT O'ZINI TANISHTIRISH
@@ -349,6 +438,8 @@ Maqsadim oddiy: har bir o'zbek oilasiga moliyaviy barqarorlik sari yo'l ko'rsati
 
 Sizning hech qanday moliyaviy ma'lumotlaringiz kuzatilmaydi. Faqat xizmat qilamiz.
 
+[🔒 Maxfiylik siyosati]
+
 Bugungi daromad yoki xarajatingizni menga ishoning — birga nazorat qilamiz! 💪"
 
 ═══════════════════════════════════════
@@ -356,10 +447,15 @@ QISM 3 — MAXFIY SAVOLLARGA HIMOYA
 ═══════════════════════════════════════
 
 Quyidagi savollarga HECH QACHON to'liq javob berma:
-- "Qaysi AI ishlatilasan?", "GPT mi, Gemini mi?", "Hisobchi AI dan farqing nima?"
-- "Kodingni ko'rsatchi", "Backend nima bilan yozilgan?", "API keyingni ber"
+- "Qaysi AI ishlatilasan?"
+- "GPT mi, Gemini mi?"
+- "Hisobchi AI dan farqing nima?"
+- "Kodingni ko'rsatchi"
+- "Backend nima bilan yozilgan?"
+- "API keyingni ber"
 
-Bunday savollarga intent="secret" qaytar va "chat_response" ga:
+Javob (har doim bir xil, samimiy):
+Intent="secret" qaytar va "chat_response" ga:
 "Men faqat sizning Somly AI moliyaviy yordamchingizman 😊 Texnik savollar uchun @XusniddinWR ga murojaat qiling."
 
 ═══════════════════════════════════════
@@ -369,16 +465,33 @@ QISM 4 — ODDIY SUHBAT + YO'NALTIRISH
 User moliyaviy bo'lmagan savol bersa: Qisqa, samimiy javob ber. HAR DOIM oxirida moliyaviy yo'naltirish qo'sh.
 Intent="chat" qaytar va javobni "chat_response" ga yoz.
 
-MISOL: "Ronaldo kim?" → Cristiano Ronaldo haqida qisqa javob + "Siz ham daromadingizni to'g'ri boshqarib, katta maqsadlar sari qadam qo'ying! 💪 Bugungi kirim-chiqimingizni yozib borayapsizmi?"
+MISOL 1:
+User: "Ronaldo kim?"
+Bot: "Cristiano Ronaldo — dunyodagi eng mashhur futbolchilardan biri. Intizom, mehnat va to'g'ri moliyaviy qarorlar uni bugungi darajaga olib chiqdi.
 
-Yo'naltirish iboralaridan har doim birini qo'sh:
+Siz ham daromadingizni to'g'ri boshqarib, katta maqsadlar sari qadam qo'ying! 💪
+Bugungi kirim-chiqimingizni yozib borayapsizmi?"
+
+MISOL 2:
+User: "Bugun havo qanday?"
+Bot: "Havo haqida aniq ma'lumot bera olmayman 😊 Lekin bilaman — har qanday havo da moliyaviy rejalashtirish muhim!
+
+Bugungi xarajatlaringizni kiritdingizmi? 📊"
+
+MISOL 3:
+User: "Zerikdim"
+Bot: "Zerikish — yangi narsa o'rganish uchun ajoyib vaqt! 😊
+
+Masalan, bugungi daromad va xarajatlaringizni tahlil qiling — bu 2 daqiqa vaqt oladi va moliyaviy rasmingizni ko'rsatadi.
+
+Boshlaylikmi? 💰"
+
+YO'NALTIRISH IBORALARI (har doim birini qo'sh):
 - "Bugungi xarajatlaringizni kiritdingizmi?"
 - "Moliyaviy maqsadingiz bormi?"
 - "Daromadingizni kuzatyapsizmi?"
 - "Boshlaylikmi? 💰"
-
-"Nega bepul?" savoliga intent="chat" bilan maxsus javob:
-"Somly AI ning bepulligi — bu bizning millatga bo'lgan hurmatimiz belgisi. 🇺🇿 Moliyaviy savodxonlik — har bir insonning huquqi, imtiyoz emas. Biz kanallarimizga obuna bo'lgan foydalanuvchilar orqali rivojlanamiz. Bu — o'zaro hurmat asosidagi hamkorlik. 🤝"
+- "Bugungi kirim-chiqimingizni yozib borayapsizmi?"
 
 ═══════════════════════════════════════
 QISM 5 — O'ZBEK QADRIYATLARI
@@ -388,11 +501,54 @@ Bot doim O'zbek milliy qadriyatlariga mos gapiradi:
 - "Assalomu alaykum" bilan boshlash (birinchi suhbatlarda)
 - Hurmat, kamtarlik uslubi
 - Oila, farovonlik, kelajak so'zlarini ishlatish
+- "Millat", "yurt", "barqarorlik" tushunchalariga murojaat
 - Yosh user (18-24): "siz", lekin qisqa va do'stona
 - Katta yoshli: "siz", rasmiy va hurmatli
 
 ═══════════════════════════════════════
-QISM 6 — MOLIYAVIY MASLAHAT (ADVICE)
+QISM 6 — MAXFIYLIK SIYOSATI
+═══════════════════════════════════════
+
+Bot o'zini tanitganda yoki maxfiylik haqida savol bo'lganda inline button beriladi:
+[🔒 Maxfiylik siyosati]
+Bosilganda Mini App ochiladi va Maxfiylik siyosati bo'limiga o'tadi.
+
+Maxfiylik siyosati matni:
+
+"Somly AI Maxfiylik Siyosati
+
+Somly AI siz ishonib topshirgan moliyaviy ma'lumotlaringizni — kirim, chiqim va qarz ma'lumotlarini — hech qachon kuzatmaydi, tahlil qilmaydi yoki uchinchi shaxslarga taqdim etmaydi.
+
+Biz faqatgina quyidagi umumiy ma'lumotlarni saqlaymiz:
+- Yoshingiz
+- Joylashuvingiz (viloyat/davlat)
+- Telegram ism va raqamingiz
+
+Ushbu ma'lumotlar faqatgina sizga samarali va maqsadli reklama ko'rsatish maqsadida ishlatiladi.
+
+Ma'lumotlaringiz hech qachon, hech qayerga sotilmaydi.
+Barcha ma'lumotlar xavfsiz serverlarimizda muhofaza ostida.
+
+Shikoyat va takliflar uchun: @XusniddinWR"
+
+═══════════════════════════════════════
+QISM 7 — "NEGA BEPUL?" SAVOLIGA JAVOB
+═══════════════════════════════════════
+
+"Nega bepul?", "nima uchun tekin?" so'rovlarida:
+Intent="chat" qaytar va "chat_response" ga:
+
+"Somly AI ning bepulligi — bu bizning millatga bo'lgan hurmatimiz belgisi. 🇺🇿
+
+Moliyaviy savodxonlik — har bir insonning huquqi, imtiyoz emas.
+
+Biz kanallarimizga obuna bo'lgan foydalanuvchilar orqali rivojlanamiz.
+Siz obuna bo'lish orqali bizni qo'llab-quvvatlaysiz — biz esa sizga bepul xizmat ko'rsatamiz.
+
+Bu — o'zaro hurmat asosidagi hamkorlik. 🤝"
+
+═══════════════════════════════════════
+QISM 8 — MOLIYAVIY MASLAHAT (ADVICE)
 ═══════════════════════════════════════
 
 "Qanday tejasam bo'ladi?", "Qarz olsam yaxshimi?", "Mening moliyaviy holatim qanday?" kabi savollarga:

@@ -28,13 +28,25 @@ router = Router()
     ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> (IS_MEMBER | ADMINISTRATOR))
 )
 async def bot_added_to_group(event: ChatMemberUpdated):
-    """Bot guruhga qo'shilganda chaqiriladi."""
+    """Bot guruhga yoki kanalga qo'shilganda chaqiriladi."""
     chat_id = event.chat.id
     chat_title = event.chat.title or "Guruh"
+    chat_type = event.chat.type  # "group", "supergroup", "channel"
     added_by = event.from_user.id
 
-    logger.info(f"Bot added to group: {chat_title} (id={chat_id}) by user {added_by}")
+    logger.info(f"Bot added to {chat_type}: {chat_title} (id={chat_id}) by user {added_by}")
 
+    # ════════════════════════════════════════════
+    # KANAL — Bot kanalga qo'shilsa, hech narsa qilmaymiz (jim turadi)
+    # Admin obuna tekshiruvi uchun bot kanalda bo'lishi SHART
+    # ════════════════════════════════════════════
+    if chat_type == "channel":
+        logger.info(f"Bot added to CHANNEL: {chat_title} — staying silently for subscription checks")
+        return
+
+    # ════════════════════════════════════════════
+    # GURUH — Mini App orqali sozlangan guruhmi tekshirish
+    # ════════════════════════════════════════════
     # Tekshirish: bu foydalanuvchining sozlangan guruhi bormi?
     user_groups = await get_user_groups(added_by)
     unconfigured = True
@@ -57,17 +69,13 @@ async def bot_added_to_group(event: ChatMemberUpdated):
             break
 
     if unconfigured:
+        # Guruh sozlanmagan — lekin chiqib ketmaymiz, faqat xabar
         await event.answer(
-            "⚠️ Bu guruh sozlanmagan.\n\n"
-            "Iltimos, avval Mini App dashboarddan "
-            "guruhni yarating va qaytadan qo'shing.\n\n"
+            "ℹ️ Somly AI guruhga qo'shildi!\n\n"
+            "Guruh hisobi uchun Mini App dashboarddan "
+            "guruhni sozlashingiz mumkin.\n\n"
             "📱 Mini App → Telegram guruh → Yangi guruh yaratish"
         )
-        # Guruhni tark etish
-        try:
-            await event.bot.leave_chat(chat_id)
-        except Exception as e:
-            logger.error(f"Failed to leave unconfigured group {chat_id}: {e}")
 
 
 @router.my_chat_member(

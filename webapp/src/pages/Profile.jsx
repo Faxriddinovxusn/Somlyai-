@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { 
   Users, CreditCard, Tags, Bell, Download, Trash2, 
@@ -202,9 +203,9 @@ const ProfilePage = ({ initData }) => {
   );
 
   // ── Modal wrapper ──
-  const ModalOverlay = ({ children, onClose }) => (
+  const ModalOverlay = ({ children, onClose }) => createPortal(
     <div className="modal-overlay" onClick={onClose} 
-      style={{ backdropFilter: 'blur(12px)', background: 'rgba(0,0,0,0.5)' }}>
+      style={{ backdropFilter: 'blur(12px)', background: 'rgba(0,0,0,0.5)', zIndex: 9999 }}>
       <div className="modal-content" onClick={e => e.stopPropagation()} 
         style={{ 
           background: '#1C1C1E', borderRadius: '28px', 
@@ -213,7 +214,8 @@ const ProfilePage = ({ initData }) => {
         }}>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 
   const ModalHeader = ({ title, onClose }) => (

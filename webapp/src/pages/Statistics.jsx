@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Calendar, X, TrendingUp, TrendingDown, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { fetchApi, getExchangeRates } from '../utils/api';
@@ -373,8 +374,8 @@ const StatisticsPage = ({ initData }) => {
       </div>
 
       {/* Date Modal */}
-      {dateModal && (
-        <div className="modal-overlay" onClick={() => setDateModal(false)}>
+      {dateModal && createPortal(
+        <div className="modal-overlay" onClick={() => setDateModal(false)} style={{ zIndex: 9999 }}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <div className="flex-between" style={{ marginBottom: '24px' }}>
               <h3 style={{ fontSize: '20px', fontWeight: 'bold' }}>Davrni tanlang</h3>
@@ -400,7 +401,8 @@ const StatisticsPage = ({ initData }) => {
 
             <button onClick={() => setDateModal(false)} style={{ width: '100%', padding: '14px', background: 'var(--primary)', color: '#fff', border: 'none', borderRadius: '12px', fontSize: '16px', fontWeight: 'bold', cursor: 'pointer' }}>Qo'llash</button>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

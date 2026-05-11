@@ -193,12 +193,103 @@ async def cmd_setchannel(message: Message, bot: Bot):
     except ValueError:
         await message.answer("❌ Tartib raqami son bo'lishi kerak.")
 
+async def _get_valid_webapp_url():
+    """Webapp URL ni olish. Noto'g'ri bo'lsa ngrok dan avtomatik aniqlashga harakat."""
+    from src.database import get_webapp_url, set_webapp_url
+    url = await get_webapp_url()
+
+    # URL haqiqiy HTTPS URL ekanligini tekshirish
+    if url and url.startswith("https://") and "." in url and "YOUR_" not in url.upper():
+        return url
+
+    # Ngrok dan avtomatik aniqlash
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=3)) as session:
+            async with session.get("http://127.0.0.1:4040/api/tunnels") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for tunnel in data.get("tunnels", []):
+                        pub_url = tunnel.get("public_url", "")
+                        if pub_url.startswith("https://"):
+                            await set_webapp_url(pub_url)
+                            return pub_url
+    except Exception:
+        pass
+
+    return None
+
+
 @router.message(Command("admin"))
+async def cmd_admin_panel(message: Message, bot: Bot):
+    if not await check_admin(message.from_user.id, message, bot): return
+
+    base_url = await _get_valid_webapp_url()
+
+    # Agar URL o'rnatilmagan yoki noto'g'ri bo'lsa
+    if not base_url:
+        await message.answer(
+            "⚠️ <b>WebApp URL o'rnatilmagan yoki noto'g'ri!</b>\n\n"
+            "Admin panelga kirish uchun avval URL o'rnating:\n"
+            "<code>/setwebapp https://NGROK_URL</code>\n\n"
+            "📌 Ngrok URL ni ngrok terminalidan oling\n"
+            "(masalan: https://abc123.ngrok-free.app)",
+            parse_mode="HTML"
+        )
+        return
+
+    admin_url = f"{base_url.rstrip('/')}/admin"
+
+    try:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔐 Admin panelga kirish", web_app=WebAppInfo(url=admin_url))]
+        ])
+        await message.answer("🛠 <b>Somly AI Admin Paneli</b>\n\nMini App orqali botni boshqarish uchun quyidagi tugmani bosing:", reply_markup=kb, parse_mode="HTML")
+    except Exception as e:
+        await message.answer(
+            f"❌ URL xatosi: <code>{admin_url}</code>\n\n"
+            f"To'g'ri URL o'rnating:\n<code>/setwebapp https://NGROK_URL</code>",
+            parse_mode="HTML"
+        )
+
+
+@router.message(Command("pin_change"))
+async def cmd_pin_change(message: Message, bot: Bot):
+    if not await check_admin(message.from_user.id, message, bot): return
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("Format: /pin_change [eski_pin] [yangi_pin]\nMisol: /pin_change 1973 1234")
+        return
+    
+    old_pin = args[1]
+    new_pin = args[2]
+    
+    if len(new_pin) != 4 or not new_pin.isdigit():
+        await message.answer("❌ Yangi PIN faqat 4 ta raqamdan iborat bo'lishi kerak.")
+        return
+        
+    from src.database import db
+    settings = await db["admin_settings"].find_one({"key": "pin"})
+    stored_pin = settings["value"] if settings else "1973"
+    
+    if old_pin != stored_pin:
+        await message.answer("❌ Eski PIN noto'g'ri.")
+        return
+        
+    await db["admin_settings"].update_one(
+        {"key": "pin"},
+        {"$set": {"key": "pin", "value": new_pin}},
+        upsert=True
+    )
+    await message.answer("✅ PIN muvaffaqiyatli o'zgartirildi!")
+
+
+@router.message(Command("set_admin"))
 async def cmd_add_admin(message: Message, bot: Bot):
     if not await check_admin(message.from_user.id, message, bot): return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("Xato! Format: /admin [telegram_id]")
+        await message.answer("Xato! Format: /set_admin [telegram_id]")
         return
     try:
         new_admin_id = int(args[1])
@@ -229,89 +320,138 @@ async def cmd_remove_admin(message: Message, bot: Bot):
 
 @router.message(Command("add_channel"))
 async def cmd_add_channel(message: Message, state: FSMContext, bot: Bot):
+    """Format: /add_channel @kanal_username [Tugma Nomi]
+    Yoki: /add_channel https://t.me/kanal_nomi [Tugma Nomi]
+    Agar tugma nomi berilmasa, kanal username'i ishlatiladi."""
     if not await check_admin(message.from_user.id, message, bot): return
-    await message.answer("Yangi kanal qoshish:\\nKanal linkini yuboring (Masalan: https://t.me/kanal_nomi):")
-    await state.set_state(ChannelAdminStates.waiting_for_add_link)
-
-@router.message(ChannelAdminStates.waiting_for_add_link)
-async def process_add_link(message: Message, state: FSMContext):
-    link = message.text.strip()
-    if not link.startswith("http") and not link.startswith("@"):
-         await message.answer("Xato! Link 'https://' yoki '@' bilan boshlanishi kerak. Qaytadan yuboring:")
-         return
-    await state.update_data(new_channel_link=link)
-    await message.answer("Bu kanal uchun tugma nomini qanday qo'yamiz? (Masalan: Somly AI Rasmiy)")
-    await state.set_state(ChannelAdminStates.waiting_for_add_name)
-
-@router.message(ChannelAdminStates.waiting_for_add_name)
-async def process_add_name(message: Message, state: FSMContext):
-    name = message.text.strip()
-    data = await state.get_data()
-    link = data.get("new_channel_link")
     
-    if await add_channel(link, name):
-        await message.answer(f"✅ Kanal muvaffaqiyatli qo'shildi!\\nNom: {name}\\nLink: {link}\\n\\nEslatma: Botni shu kanalga admin qilishni unutmang!")
-    else:
-        await message.answer("❌ Bu kanal allaqachon qo'shilgan yoki xatolik yuz berdi.")
-    await state.clear()
-
-
-@router.message(Command("change_channel"))
-async def cmd_change_channel(message: Message, state: FSMContext, bot: Bot):
-    if not await check_admin(message.from_user.id, message, bot): return
-    channels = await get_all_channels()
-    if not channels:
-        await message.answer("Hozircha kanallar yo'q. Avval /add_channel orqali kanal qo'shing.")
+    args = message.text.split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer(
+            "📢 <b>Kanal qo'shish:</b>\n\n"
+            "Format: <code>/add_channel @kanal Tugma Nomi</code>\n"
+            "Masalan: <code>/add_channel @Somly_AI Somly AI Rasmiy</code>\n\n"
+            "Tugma nomi ixtiyoriy — berilmasa kanal linki yoziladi.",
+            parse_mode="HTML"
+        )
         return
-        
-    msg = "Qaysi kanalni o'zgartirmoqchisiz? Raqamini yuboring:\\n\\n"
-    for idx, c in enumerate(channels, 1):
-        msg += f"{idx}. {c['name']} ({c['link']})\\n"
     
-    await message.answer(msg)
-    await state.set_state(ChannelAdminStates.waiting_for_change_selection)
-    # Kanallar sonini saqlab qolamiz tekshirish uchun
-    await state.update_data(channels_count=len(channels))
-
-@router.message(ChannelAdminStates.waiting_for_change_selection)
-async def process_change_selection(message: Message, state: FSMContext):
-    try:
-        index = int(message.text.strip()) - 1
-        data = await state.get_data()
-        channels_count = data.get("channels_count", 0)
-        
-        if index < 0 or index >= channels_count:
-             await message.answer("❌ Noto'g'ri raqam! Iltimos, ro'yxatdagi raqamlardan birini yuboring:")
-             return
-             
-        await state.update_data(change_channel_index=index)
-        await message.answer("Yangi kanal linkini yuboring:")
-        await state.set_state(ChannelAdminStates.waiting_for_change_link)
-    except ValueError:
-        await message.answer("❌ Iltimos, faqat raqam yuboring:")
-
-@router.message(ChannelAdminStates.waiting_for_change_link)
-async def process_change_link(message: Message, state: FSMContext):
-    link = message.text.strip()
-    if not link.startswith("http") and not link.startswith("@"):
-         await message.answer("Xato! Link 'https://' yoki '@' bilan boshlanishi kerak. Qaytadan yuboring:")
-         return
-    await state.update_data(change_channel_link=link)
-    await message.answer("Yangi kanal uchun tugma nomini qanday qo'yamiz?")
-    await state.set_state(ChannelAdminStates.waiting_for_change_name)
-
-@router.message(ChannelAdminStates.waiting_for_change_name)
-async def process_change_name(message: Message, state: FSMContext):
-    name = message.text.strip()
-    data = await state.get_data()
-    index = data.get("change_channel_index")
-    link = data.get("change_channel_link")
+    link = args[1].strip()
+    name = args[2].strip() if len(args) > 2 else link
     
-    if await update_channel_by_index(index, link, name):
-         await message.answer(f"✅ Kanal o'zgartirildi!\\nYangi nom: {name}\\nYangi link: {link}")
+    # Link formatini to'g'rilash
+    if link.startswith("@"):
+        full_link = f"https://t.me/{link[1:]}"
+    elif link.startswith("https://"):
+        full_link = link
     else:
-         await message.answer("❌ Xatolik yuz berdi.")
-    await state.clear()
+        await message.answer("❌ Link <code>@kanal</code> yoki <code>https://t.me/...</code> formatida bo'lishi kerak.", parse_mode="HTML")
+        return
+    
+    if await add_channel(full_link, name):
+        # Bot admin ekanligini tekshirish
+        chat_identifier = f"@{link[1:]}" if link.startswith("@") else link
+        admin_warning = ""
+        try:
+            bot_member = await bot.get_chat_member(chat_id=chat_identifier, user_id=(await bot.get_me()).id)
+            if bot_member.status not in ["administrator", "creator"]:
+                admin_warning = "\n\n⚠️ <b>Diqqat:</b> Bot bu kanalda admin emas! Obuna tekshiruvi ishlamaydi."
+        except Exception:
+            admin_warning = "\n\n⚠️ <b>Diqqat:</b> Bot bu kanalga kirish imkoniga ega emas! Admin qilib qo'ying."
+        
+        await message.answer(
+            f"✅ Kanal muvaffaqiyatli qo'shildi!\n"
+            f"📢 Nom: {name}\n"
+            f"🔗 Link: {full_link}{admin_warning}",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Bu kanal allaqachon qo'shilgan.")
+
+
+@router.message(Command("edit_channel"))
+async def cmd_edit_channel(message: Message, bot: Bot):
+    """Format: /edit_channel 1 @yangi_kanal [Yangi Nom]"""
+    if not await check_admin(message.from_user.id, message, bot): return
+    
+    args = message.text.split(maxsplit=3)
+    if len(args) < 3:
+        channels = await get_all_channels()
+        if not channels:
+            await message.answer("Hozircha kanallar yo'q. Avval /add_channel orqali kanal qo'shing.")
+            return
+        
+        msg = "📢 <b>Kanal o'zgartirish:</b>\n\n"
+        msg += "Format: <code>/edit_channel [raqam] @yangi_kanal [Yangi Nom]</code>\n\n"
+        msg += "<b>Hozirgi kanallar:</b>\n"
+        for idx, c in enumerate(channels, 1):
+            msg += f"{idx}. {c['name']} ({c['link']})\n"
+        await message.answer(msg, parse_mode="HTML")
+        return
+    
+    try:
+        index = int(args[1]) - 1
+        new_link = args[2].strip()
+        new_name = args[3].strip() if len(args) > 3 else new_link
+        
+        # Link formatini to'g'rilash
+        if new_link.startswith("@"):
+            full_link = f"https://t.me/{new_link[1:]}"
+        elif new_link.startswith("https://"):
+            full_link = new_link
+        else:
+            await message.answer("❌ Link <code>@kanal</code> yoki <code>https://t.me/...</code> formatida bo'lishi kerak.", parse_mode="HTML")
+            return
+        
+        channels = await get_all_channels()
+        if index < 0 or index >= len(channels):
+            await message.answer(f"❌ Bunday raqamli kanal yo'q. Jami {len(channels)} ta kanal bor.")
+            return
+        
+        if await update_channel_by_index(index, full_link, new_name):
+            await message.answer(f"✅ {index+1}-kanal o'zgartirildi!\n📢 Nom: {new_name}\n🔗 Link: {full_link}")
+        else:
+            await message.answer("❌ Xatolik yuz berdi.")
+    except ValueError:
+        await message.answer("❌ Tartib raqami son bo'lishi kerak.")
+
+
+@router.message(Command("remove_channel"))
+async def cmd_remove_channel(message: Message, bot: Bot):
+    """Format: /remove_channel @kanal_username
+    Yoki: /remove_channel https://t.me/kanal_nomi"""
+    if not await check_admin(message.from_user.id, message, bot): return
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        channels = await get_all_channels()
+        if not channels:
+            await message.answer("Hozircha kanallar yo'q.")
+            return
+        
+        msg = "📢 <b>Kanal o'chirish:</b>\n\n"
+        msg += "Format: <code>/remove_channel @kanal</code>\n\n"
+        msg += "<b>Hozirgi kanallar:</b>\n"
+        for idx, c in enumerate(channels, 1):
+            msg += f"{idx}. {c['name']} ({c['link']})\n"
+        await message.answer(msg, parse_mode="HTML")
+        return
+    
+    link = args[1].strip()
+    
+    # Link formatini to'g'rilash
+    if link.startswith("@"):
+        full_link = f"https://t.me/{link[1:]}"
+    elif link.startswith("https://"):
+        full_link = link
+    else:
+        await message.answer("❌ Link <code>@kanal</code> yoki <code>https://t.me/...</code> formatida bo'lishi kerak.", parse_mode="HTML")
+        return
+    
+    if await remove_channel(full_link):
+        await message.answer(f"✅ Kanal o'chirildi: {full_link}")
+    else:
+        await message.answer(f"❌ <code>{full_link}</code> topilmadi. /channels orqali hozirgi kanallarni ko'ring.", parse_mode="HTML")
 
 
 # ─── BROADCAST SYSTEM ───
@@ -406,9 +546,12 @@ async def cmd_setwebapp(message: Message, bot: Bot):
     if len(args) < 2:
         await message.answer("Xato! Format: /setwebapp [link]\nMasalan: /setwebapp https://...ngrok-free.app")
         return
-    url = args[1]
+    url = args[1].strip()
     if not url.startswith("https://"):
         await message.answer("❌ Xato! Link 'https://' bilan boshlanishi shart.")
+        return
+    if "YOUR_" in url.upper() or "." not in url.split("://")[1]:
+        await message.answer("❌ Bu haqiqiy URL emas! Ngrok terminalidan URL ni nusxalab yuboring.")
         return
         
     try:

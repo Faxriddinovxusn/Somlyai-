@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Minus, Handshake, ArrowRightLeft, X } from 'lucide-react';
+import { Plus, Minus, Handshake, ArrowRightLeft, X, ScanLine } from 'lucide-react';
 import { fetchApi } from '../utils/api';
+import QrScanner from '../pages/QrScanner';
 
 const QuickActions = ({ balances, onSuccess }) => {
   const [activeModal, setActiveModal] = useState(null); // 'kirim', 'chiqim', 'qarz', 'transfer'
+  const [showQrScanner, setShowQrScanner] = useState(false);
   const [form, setForm] = useState({ amount: '', category: '', balanceId: '', note: '', person: '', dueDate: '', toBalanceId: '', currency: 'UZS', direction: 'berdim' });
   const [amountError, setAmountError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -86,24 +88,35 @@ const QuickActions = ({ balances, onSuccess }) => {
 
   return (
     <div style={{ marginTop: '24px' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px' }}>
         <button onClick={() => setActiveModal('kirim')} style={{ background: 'rgba(48, 209, 88, 0.1)', border: '1px solid rgba(48, 209, 88, 0.2)', padding: '12px 4px', borderRadius: '16px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', cursor: 'pointer', color: '#30D158' }}>
           <div style={{ width: '36px', height: '36px', borderRadius: '18px', background: '#30D158', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Plus size={20} /></div>
-          <span style={{ fontSize: '12px', fontWeight: '600' }}>Kirim</span>
+          <span style={{ fontSize: '11px', fontWeight: '600' }}>Kirim</span>
         </button>
         <button onClick={() => setActiveModal('chiqim')} style={{ background: 'rgba(255, 69, 58, 0.1)', border: '1px solid rgba(255, 69, 58, 0.2)', padding: '12px 4px', borderRadius: '16px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', cursor: 'pointer', color: '#FF453A' }}>
           <div style={{ width: '36px', height: '36px', borderRadius: '18px', background: '#FF453A', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Minus size={20} /></div>
-          <span style={{ fontSize: '12px', fontWeight: '600' }}>Chiqim</span>
+          <span style={{ fontSize: '11px', fontWeight: '600' }}>Chiqim</span>
         </button>
         <button onClick={() => setActiveModal('qarz')} style={{ background: 'rgba(255, 159, 10, 0.1)', border: '1px solid rgba(255, 159, 10, 0.2)', padding: '12px 4px', borderRadius: '16px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', cursor: 'pointer', color: '#FF9F0A' }}>
           <div style={{ width: '36px', height: '36px', borderRadius: '18px', background: '#FF9F0A', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Handshake size={20} /></div>
-          <span style={{ fontSize: '12px', fontWeight: '600' }}>Qarz</span>
+          <span style={{ fontSize: '11px', fontWeight: '600' }}>Qarz</span>
         </button>
         <button onClick={() => setActiveModal('transfer')} style={{ background: 'rgba(10, 132, 255, 0.1)', border: '1px solid rgba(10, 132, 255, 0.2)', padding: '12px 4px', borderRadius: '16px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', cursor: 'pointer', color: '#0A84FF' }}>
           <div style={{ width: '36px', height: '36px', borderRadius: '18px', background: '#0A84FF', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><ArrowRightLeft size={20} /></div>
-          <span style={{ fontSize: '12px', fontWeight: '600' }}>O'tkazma</span>
+          <span style={{ fontSize: '11px', fontWeight: '600' }}>O'tkazma</span>
+        </button>
+        <button onClick={() => setShowQrScanner(true)} style={{ background: 'rgba(175, 82, 222, 0.1)', border: '1px solid rgba(175, 82, 222, 0.2)', padding: '12px 4px', borderRadius: '16px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', cursor: 'pointer', color: '#AF52DE' }}>
+          <div style={{ width: '36px', height: '36px', borderRadius: '18px', background: '#AF52DE', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><ScanLine size={20} /></div>
+          <span style={{ fontSize: '11px', fontWeight: '600' }}>Chek</span>
         </button>
       </div>
+
+      {showQrScanner && (
+        <QrScanner
+          onClose={() => setShowQrScanner(false)}
+          onSuccess={() => { setShowQrScanner(false); if (onSuccess) onSuccess(); }}
+        />
+      )}
 
       {activeModal && (
         <div className="modal-overlay" onClick={() => setActiveModal(null)} style={{ zIndex: 1000, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}>

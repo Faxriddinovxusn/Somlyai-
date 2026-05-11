@@ -1,12 +1,32 @@
 {
-    "welcome_back": "Assalomu alaykum, {name}! 🌙\nSomly AI — sizning moliyaviy yordamchingiz, siz bilan yana birga! 💪\n\nDaromad va xarajatlaringizni birga nazorat qilamiz.",
+    "choose_lang": "🌐 Tilni tanlang\nChoose your language\nВыберите язык",
+
+    "welcome_new": "💰 Somly AI bilan moliyangizni\noson va bepul boshqaring!\n\nMillatimizni moliyaviy barqarorlikka\nerishishga yordam berish maqsadida\n@XusniddinWR tomonidan yaratildi 🇺🇿\n\n✅ Mutlaqo bepul\n✅ Ovoz va matn orqali ishlaydi\n✅ Sun'iy intellekt asosida",
+
+    "ask_name": "Keling tanishib olamiz! 🙃\nIsmingizni kiriting ✏️",
+
+    "greeting_after_name": "🤝 Tanishganimdan xursandman, {name}!",
+
+    "ask_contact": "Endi pastdagi tugma orqali\ntelefon raqamingizni yuboring 📱",
+    "share_contact_btn": "📱 Raqamni yuborish",
+    "contact_required": "Iltimos, pastdagi tugmani bosib telefon raqamingizni yuboring 📱",
+
+    "registration_done": "🎉 Tabriklayman, ro'yxatdan\no'tib oldingiz!",
+
+    "channel_subscribe": "Botdan bepul foydalanish uchun\nquyidagi kanalga obuna bo'ling 👇",
+    "channel_check_btn": "✅ Obuna bo'ldim, tekshirish",
+    "channel_not_subscribed": "❌ Hali obuna bo'lmadingiz.\nIltimos obuna bo'ling 🙏",
+    "channel_subscribed": "✅ Zo'r! Endi bemalol\nfoydalanishingiz mumkin! 🎉",
+    "channel_resubscribe": "😔 Kanaldan chiqib ketibsiz.\n\nBotdan foydalanishni davom ettirish\nuchun obuna bo'ling 👇",
+
+    "first_transaction_prompt": "Botga quyidagi xabarni ovozli\nyoki matn ko'rinishida kiriting:\n\n💬 'Fastfoodga 40,000, taksiga\nesa 15,000 so'm sarfladim'\n\nShunday oddiy! 😊",
+
+    "welcome_back": "Siz allaqachon ro'yxatdansiz!\nXush kelibsiz qaytib! 😊 {name}",
+
+    "lang_changed": "Til muvaffaqiyatli o'zgartirildi 🇺🇿",
+
     "commands": "✍️ Moliyani boshqarishni boshlang!\nQuyidagi xarajatni audio yoki matn ko'rinishida yuboring:\n\n💸 Masalan: \"Fastfoodga 15,000 so'm xarajat qildim, metroga 3,000 va h.k\"",
-    "welcome_msg": "Assalomu alaykum! 🌙\nMen — Somly AI, sizning shaxsiy moliyaviy maslahatchingizman.\n\nMaqsadim oddiy: har bir o'zbek oilasiga moliyaviy barqarorlik sari yo'l ko'rsatish.\n\n✅ Mutlaqo bepul\n✅ Ovoz va matn orqali ishlaydi\n✅ Sun'iy intellekt asosida",
-    "welcome_new": "Assalomu alaykum! 🌙\n\nMen — <b>Somly AI</b>, sizning shaxsiy moliyaviy maslahatchingizman.\n\nMaqsadim oddiy: har bir o'zbek oilasiga moliyaviy barqarorlik sari yo'l ko'rsatish. Daromad va xarajatlar ustidan nazorat — farovon hayotning asosi.\n\n✅ Mutlaqo bepul\n✅ Ovoz va matn orqali ishlaydi\n✅ Sun'iy intellekt asosida\n\nKeling, tanishishni boshlaylik! 🤝",
-    "welcome_sub": "Iltimos, to'liq ismingizni kiriting:",
-    "ask_phone": "Iltimos, pastdagi tugmani bosib telefon raqamingizni yuboring 📱",
-    "btn_share_phone": "📱 Raqamni yuborish",
-    "registration_complete": "Ro'yxatdan o'tish muvaffaqiyatli yakunlandi! ✅",
+
     "main_menu_account": "📊 Mening hisobim",
     "main_menu_add": "➕ Qo'shish",
     "add_prompt": "Xarajat, daromad yoki qarzni yozing yoki ovoz yuboring:\n\n💸 'Taksiga 15,000 so'm'\n💰 'Oylik 4 million tushdi'\n🤝 'Jasurga 100 ming berdim'\n🎤 Mikrofon orqali ham ayta olasiz",
@@ -14,6 +34,7 @@
     "open_btn": "Ochish",
     "view_in_miniapp": "📱 Mini Appda ko'rish",
     "view_in_debts": "📱 Qarzlar sahifasida ko'rish",
+
     "tx_saved": "Hisobotga qo'shildi ✅",
     "tx_income": "💰 Kirim:",
     "tx_expense": "💸 Chiqim:",
@@ -24,6 +45,7 @@
     "tx_balance": "Balans: {account}",
     "limit_warning_danger": "\n\n⚠️ DIQQAT: Oylik limit tugadi! Boshqa xarajat qilmang.",
     "limit_warning_alert": "\n\n⚠️ Ogohlantirish: Limitning 80% idan oshdingiz! (Sarflangan: {spent})",
+
     "debt_saved": "Hisobotga qo'shildi ✅",
     "debt_to_me": "🤝 Bergan qarzim:",
     "debt_from_me": "🤝 Olingan qarz:",
@@ -35,8 +57,11 @@
     "debt_person": "👤 Kimga/Kimdan: {person}",
     "debt_btn_pay": "Qaytarildi ✅",
     "debt_btn_del": "O'chirish ❌",
+    "debt_no_due_date": "Belgilanmagan",
+
     "voice_processing": "Ovoz yozuvi tahlil qilinmoqda... ⏳",
     "voice_not_understood": "Kechirasiz, ovozingizni tushunib bo'lmadi. Iltimos qaytadan urinib ko'ring yoki matn ko'rinishida yozing.",
+
     "error_occurred": "Xatolik yuz berdi: {error}",
     "cat_added_bot": "✅ {name} Mini Appda:\nYangi kategoriya qo'shildi:\n{emoji} {cat_name} ({cat_type})",
     "cat_deleted_bot": "✅ {name} Mini Appda:\nKategoriya o'chirildi.",
@@ -45,8 +70,6 @@
     "debt_deleted_bot": "✅ {name} Mini Appda:\nQarz o'chirildi.",
     "tx_edited_bot": "✅ {name} Mini Appda:\nTranzaksiya tahrirlandi:\n{details}",
     "tx_deleted_bot": "✅ {name} Mini Appda:\nTranzaksiya o'chirildi:\n{amount} {currency} ({category})",
-    "lang_changed": "Til muvaffaqiyatli o'zgartirildi 🇺🇿",
-    "choose_lang": "Tilni tanlang / Выберите язык / Choose language:",
 
     "err_ai_busy": "⏳ Hozir band, 30 soniyadan keyin qayta yuboring.",
     "err_ai_down": "😔 AI hozir ishlamayapti. Keyinroq urinib ko'ring.",
@@ -57,16 +80,30 @@
     "err_voice_too_short": "🎤 Ovoz juda qisqa. Aniqroq gapiring.",
     "err_voice_whisper": "🎤 Ovozni tushunmadim. Matn orqali yozing.",
     "err_unclear_input": "Kechirasiz, xabaringizni tushuna olmadim.\nIltimos, xarajat, daromad yoki qarz\nhaqida ma'lumot yozing.",
+
     "deeplink_view_reports": "Hisobotni ko'rish",
     "deeplink_view_stats": "Statistikani ko'rish",
     "deeplink_view_debts": "Qarzlarni ko'rish",
-    "debt_no_due_date": "Belgilanmagan",
+
     "ask_age": "Yoshingizni tanlang:",
     "ask_location": "Qayerda yashaysiz?",
     "ask_region": "Qaysi viloyatdansiz?",
     "ask_country_name": "Iltimos, davlat nomini yozing:",
     "btn_uzb": "🇺🇿 O'zbekiston",
     "btn_other_country": "🌍 Boshqa davlat",
-    "ask_name": "🤝 Keling tanishib olamiz!\n\nTo'liq ismingizni kiriting (matn yoki ovozli):",
-    "ask_contact": "Ajoyib, {name}! 🎉\n\nEndi telefon raqamingizni ulashing — bu sizning hisobingizni xavfsiz saqlash uchun kerak."
+
+    "seg_age_question": "Bot yanada samarali ishlash uchun quyidagi savolga javob bering 😊\n\n📅 Yoshingiz nechida?",
+    "seg_age_saved": "Yoshingiz saqlandi!",
+    "seg_location_question": "📍 Qaysi davlatdansiz?",
+    "seg_ask_region": "📍 Qaysi viloyatdansiz?",
+    "seg_ask_country_name": "📍 Davlatingiz nomini kiriting:",
+    "seg_uzb": "O'zbekiston",
+    "seg_russia": "Rossiya",
+    "seg_other": "Boshqa",
+    "seg_location_saved": "📍 Men {country} vaqtiga moslashdim.\nEndi yanada samaraliroq ishlayman siz uchun! ⏰\n\n🕐 Timezone: {timezone}",
+    "seg_interest_question": "{emoji} {category} ga qiziqasizmi?",
+    "seg_interest_added": "qiziqishlaringizga qo'shildi!",
+    "seg_interest_skipped": "Tushundim, keyingi safar! 😊",
+    "seg_yes": "Ha",
+    "seg_no": "Yo'q"
 }

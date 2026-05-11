@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, MoreVertical, Plus, ChevronDown, ChevronRight, X, Trash2, Check, RefreshCw } from 'lucide-react';
 import { fetchApi } from '../utils/api';
 import PageHeader from '../components/PageHeader';
@@ -270,7 +271,7 @@ const CategoriesPage = ({ initData }) => {
       </div>
 
       {/* Add / Edit Modal - Professional Bottom Sheet */}
-      {(activeModal === 'add' || activeModal === 'edit') && (
+      {(activeModal === 'add' || activeModal === 'edit') && createPortal(
         <div style={{
           position: 'fixed',
           top: 0,
@@ -278,9 +279,10 @@ const CategoriesPage = ({ initData }) => {
           right: 0,
           bottom: 0,
           background: 'rgba(0,0,0,0.6)',
+          backdropFilter: 'blur(4px)',
           display: 'flex',
           alignItems: 'flex-end',
-          zIndex: 1000
+          zIndex: 9999
         }}
         onClick={() => { setActiveModal(null); setShowEmojiPicker(false); setShowColorPicker(false); }}
         >
@@ -639,12 +641,13 @@ const CategoriesPage = ({ initData }) => {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
       {/* Delete Confirmation Modal */}
-      {activeModal === 'delete' && selectedCat && (
-        <div className="modal-overlay" onClick={() => setActiveModal('edit')}>
+      {activeModal === 'delete' && selectedCat && createPortal(
+        <div className="modal-overlay" onClick={() => setActiveModal('edit')} style={{ zIndex: 9999 }}>
           <div className="modal-content" onClick={e => e.stopPropagation()} style={{ textAlign: 'center' }}>
             <div style={{ width: '64px', height: '64px', background: 'rgba(255, 69, 58, 0.1)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', color: 'var(--danger)' }}>
               <Trash2 size={32} />
@@ -664,7 +667,8 @@ const CategoriesPage = ({ initData }) => {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

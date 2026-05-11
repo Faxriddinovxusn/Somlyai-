@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Plus, MoreVertical, CreditCard, ChevronDown, X, Check, Edit2, Trash2, PieChart, Wallet, Search, RefreshCw, ShieldCheck, Smartphone, Users } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { fetchApi, getExchangeRates } from '../utils/api';
@@ -403,8 +404,16 @@ const BalancesPage = ({ initData }) => {
             {/* Edit Option */}
             <button
               onClick={() => {
-                setActiveModal(null);
-                // TODO: Add edit balance functionality
+                setAddForm({
+                  title: selectedBal.title,
+                  emoji: selectedBal.emoji || '💰',
+                  color: selectedBal.color || '#0A84FF',
+                  currency: selectedBal.currency,
+                  amount: selectedBal.amount, // Just for display if needed
+                  hasLimit: selectedBal.limit ? true : false,
+                  limitAmount: selectedBal.limit || ''
+                });
+                setActiveModal('edit_balance');
               }}
               style={{
                 background: 'none',
@@ -1182,6 +1191,300 @@ const BalancesPage = ({ initData }) => {
           </div>
         </div>
       )}
+      
+      {/* Edit Balance Modal */}
+      {activeModal === 'edit_balance' && selectedBal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'flex-end',
+          zIndex: 1000
+        }}
+        onClick={() => setActiveModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: 'var(--card)',
+              width: '100%',
+              borderRadius: '24px 24px 0 0',
+              padding: '24px 20px',
+              maxHeight: '92vh',
+              overflowY: 'auto'
+            }}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '24px'
+            }}>
+              <h2 style={{ margin: 0, fontSize: '22px', fontWeight: '700' }}>
+                Balansni tahrirlash
+              </h2>
+              <button
+                onClick={() => setActiveModal(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '24px', padding: '4px' }}
+              >✕</button>
+            </div>
+
+            {/* Title Field with Emoji Picker */}
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: '600', display: 'block', marginBottom: '8px' }}>
+                Sarlavha
+              </label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                  style={{
+                    width: '52px', height: '52px', minWidth: '52px', borderRadius: '12px',
+                    background: 'var(--bg)', border: '2px solid var(--border)', fontSize: '28px',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'
+                  }}
+                >
+                  {addForm.emoji}
+                </button>
+                <input
+                  type="text"
+                  placeholder="Balans nomini kiriting..."
+                  value={addForm.title}
+                  onChange={(e) => setAddForm({...addForm, title: e.target.value})}
+                  style={{
+                    flex: 1, background: 'var(--bg)', border: '1px solid var(--border)',
+                    padding: '12px 16px', borderRadius: '12px', color: 'var(--text-primary)', fontSize: '15px', outline: 'none'
+                  }}
+                />
+              </div>
+              {showEmojiPicker && (
+                <div style={{
+                  marginTop: '12px', background: 'var(--bg)', border: '1px solid var(--border)',
+                  borderRadius: '12px', padding: '12px', display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)',
+                  gap: '6px', maxHeight: '200px', overflowY: 'auto'
+                }}>
+                  {emojis.map((emoji) => (
+                    <button
+                      key={emoji}
+                      onClick={() => { setAddForm({...addForm, emoji}); setShowEmojiPicker(false); }}
+                      style={{
+                        background: addForm.emoji === emoji ? 'rgba(10, 132, 255, 0.2)' : 'transparent',
+                        border: addForm.emoji === emoji ? '2px solid var(--primary)' : '1px solid var(--border)',
+                        borderRadius: '8px', fontSize: '22px', padding: '8px', cursor: 'pointer'
+                      }}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Amount and Currency (Disabled for Edit) */}
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{
+                fontSize: '12px',
+                color: 'var(--text-secondary)',
+                fontWeight: '600',
+                display: 'block',
+                marginBottom: '8px'
+              }}>
+                Miqdor (tahrirlanmaydi)
+              </label>
+              <div style={{
+                display: 'flex',
+                gap: '8px'
+              }}>
+                <input
+                  type="number"
+                  disabled
+                  value={addForm.amount}
+                  style={{
+                    flex: 1,
+                    background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                    padding: '12px 16px',
+                    borderRadius: '12px',
+                    color: 'var(--text-secondary)',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    outline: 'none',
+                    opacity: 0.7
+                  }}
+                />
+                <input
+                  type="text"
+                  disabled
+                  value={addForm.currency}
+                  style={{
+                    width: '80px',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                    padding: '12px 16px',
+                    borderRadius: '12px',
+                    color: 'var(--text-secondary)',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    outline: 'none',
+                    opacity: 0.7,
+                    textAlign: 'center'
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Color Picker */}
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{
+                fontSize: '12px',
+                color: 'var(--text-secondary)',
+                fontWeight: '600',
+                display: 'block',
+                marginBottom: '8px'
+              }}>
+                Rangi
+              </label>
+              <div style={{
+                display: 'flex',
+                gap: '8px',
+                alignItems: 'center'
+              }}>
+                {colors.map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => setAddForm({...addForm, color: c})}
+                    style={{
+                      width: '44px',
+                      height: '44px',
+                      borderRadius: '12px',
+                      backgroundColor: c,
+                      border: addForm.color === c ? '3px solid #FFF' : '2px solid rgba(255,255,255,0.2)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      boxShadow: addForm.color === c ? `0 0 16px ${c}99` : `0 2px 8px ${c}33`,
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    {addForm.color === c && <Check size={18} color="#000" strokeWidth={3} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Limit Switch */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '12px 16px',
+                background: 'var(--bg)',
+                borderRadius: '12px',
+                border: '1px solid var(--border)'
+              }}>
+                <div>
+                  <h4 style={{ margin: 0, fontSize: '15px', fontWeight: '600' }}>Oylik limit</h4>
+                  <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    Xarajatlarni nazorat qilish uchun
+                  </p>
+                </div>
+                <label className="switch" style={{ position: 'relative', display: 'inline-block', width: '44px', height: '24px' }}>
+                  <input 
+                    type="checkbox" 
+                    checked={addForm.hasLimit}
+                    onChange={(e) => setAddForm({...addForm, hasLimit: e.target.checked})}
+                    style={{ opacity: 0, width: 0, height: 0 }} 
+                  />
+                  <span className="slider round" style={{
+                    position: 'absolute', cursor: 'pointer', top: 0, left: 0, right: 0, bottom: 0,
+                    backgroundColor: addForm.hasLimit ? 'var(--primary)' : 'var(--border)',
+                    transition: '.4s', borderRadius: '34px'
+                  }}>
+                    <span style={{
+                      position: 'absolute', content: '""', height: '18px', width: '18px',
+                      left: addForm.hasLimit ? '22px' : '3px', bottom: '3px',
+                      backgroundColor: 'white', transition: '.4s', borderRadius: '50%'
+                    }}></span>
+                  </span>
+                </label>
+              </div>
+
+              {addForm.hasLimit && (
+                <div style={{ marginTop: '12px' }}>
+                  <input
+                    type="number"
+                    placeholder="Limit miqdorini kiriting"
+                    value={addForm.limitAmount}
+                    onChange={(e) => setAddForm({...addForm, limitAmount: e.target.value})}
+                    style={{
+                      width: '100%',
+                      background: 'var(--bg)',
+                      border: '1px solid var(--border)',
+                      padding: '12px 16px',
+                      borderRadius: '12px',
+                      color: 'var(--text-primary)',
+                      fontSize: '15px',
+                      outline: 'none',
+                      boxSizing: 'border-box'
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Save Button */}
+            <button
+              onClick={async () => {
+                if (!addForm.title) return;
+                try {
+                  const payload = {
+                    title: addForm.title,
+                    emoji: addForm.emoji,
+                    color: addForm.color,
+                    limit: addForm.hasLimit ? parseInt(addForm.limitAmount) : null
+                  };
+                  
+                  await fetchApi(`/balances/${selectedBal.currency}`, {
+                    method: 'PUT',
+                    body: JSON.stringify(payload)
+                  });
+                  
+                  setActiveModal(null);
+                  loadBalances(true);
+                } catch(e) {
+                  console.error(e);
+                  alert("Xatolik yuz berdi");
+                }
+              }}
+              style={{
+                width: '100%',
+                background: 'var(--primary)',
+                border: 'none',
+                padding: '16px',
+                borderRadius: '16px',
+                color: '#fff',
+                fontWeight: '700',
+                fontSize: '16px',
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(10, 132, 255, 0.3)',
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'center',
+                gap: '8px'
+              }}
+            >
+              <Check size={20} />
+              Saqlash
+            </button>
+          </div>
+        </div>
+      )}
+
 
       {/* Transfer Modal */}
       {activeModal === 'transfer' && selectedBal && (

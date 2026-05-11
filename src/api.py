@@ -4,7 +4,9 @@ Runs using aiohttp with error handling middleware.
 """
 
 import json
+import os
 import logging
+from datetime import datetime
 from aiohttp import web
 from src.database import (
     get_user, get_user_all_balances, get_active_debts, transactions_collection,
@@ -63,6 +65,90 @@ async def websocket_handler(request):
                 print('ws connection closed with exception %s' % ws.exception())
     finally:
         ws_manager.disconnect(user_id, ws)
+    return ws
+
+@routes.get('/api/redirect')
+async def channel_redirect_handler(request):
+    """Kanalga o'tishni kuzatish va redirect qilish."""
+    user_id_str = request.query.get('u')
+    channel_link = request.query.get('c')
+    
+    if user_id_str and channel_link:
+        try:
+            user_id = int(user_id_str)
+            from src.database import track_channel_click
+            await track_channel_click(user_id, channel_link, "onboarding")
+        except ValueError:
+            pass
+            
+    # Asosiy kanal havolasiga yo'naltirish
+    fallback_link = channel_link if channel_link else "https://t.me"
+    raise web.HTTPFound(fallback_link)
+
+@routes.post('/api/qr-scan')
+async def qr_scan_handler(request):
+    """Mini App dan QR URL qabul qilib, fiscal data qaytarish."""
+    try:
+        body = await request.json()
+        qr_url = body.get("url", "")
+        user_id = body.get("user_id", 0)
+        
+        if not qr_url:
+            return set_cors(web.json_response({"error": "Missing url"}, status=400))
+        
+        from src.services.qr_service import is_fiscal_url, fetch_fiscal_receipt
+        from src.database import save_qr_scan
+        
+        if not is_fiscal_url(qr_url):
+            await save_qr_scan(user_id, "not_fiscal", {"url": qr_url})
+            return set_cors(web.json_response({"error": "Not a fiscal URL", "fiscal": False}))
+        
+        receipt = await fetch_fiscal_receipt(qr_url)
+        await save_qr_scan(user_id, "success" if receipt["success"] else "fetch_failed", {
+            "url": qr_url, "total": receipt.get("total", 0)
+        })
+        
+        return set_cors(web.json_response(receipt))
+    except Exception as e:
+        logger.error(f"QR scan API error: {e}")
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/qr-stats')
+async def admin_qr_stats(request):
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import get_qr_scan_stats
+        data = await get_qr_scan_stats()
+        return set_cors(web.json_response(data))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/ws')
+async def admin_websocket_handler(request):
+    token = request.query.get('token')
+    # Use a dummy request to check token logic since it expects headers, or we can just mock it
+    # _verify_admin_token checks request.headers.get("Authorization"), let's check it directly
+    auth_header = f"Bearer {token}" if token else ""
+    class MockRequest:
+        headers = {"Authorization": auth_header}
+    from src.api import _verify_admin_token # Need to ensure we can call it
+    if not _verify_admin_token(MockRequest()):
+        return web.Response(status=401, text="Unauthorized")
+        
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    
+    ws_manager.connect_admin(ws)
+    try:
+        await ws.send_str(json.dumps({"event": "connected", "data": {"status": "ok"}}))
+        async for msg in ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                pass
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                print('admin ws connection closed with exception %s' % ws.exception())
+    finally:
+        ws_manager.disconnect_admin(ws)
     return ws
 
 @routes.get('/api/exchange-rates')
@@ -289,10 +375,12 @@ async def get_categories(request):
         return set_cors(web.json_response({"error": "Missing user_id"}, status=400))
     
     custom_cats = await get_custom_categories(user_id)
-    # Convert ObjectId to string
+    # Convert ObjectId and datetime
     for cat in custom_cats:
         cat["id"] = str(cat["_id"])
         del cat["_id"]
+        if "created_at" in cat and isinstance(cat["created_at"], datetime):
+            cat["created_at"] = cat["created_at"].isoformat()
         
     return set_cors(web.json_response({
         "system": SYSTEM_CATEGORIES,
@@ -369,6 +457,37 @@ async def create_balance(request):
         return set_cors(web.json_response({"success": True}))
     except Exception as e:
         logger.error(f"Error creating balance: {e}")
+        return set_cors(web.json_response({"error": "Server error"}, status=500))
+
+@routes.put('/api/balances/{currency}')
+async def update_balance(request):
+    try:
+        data = await request.json()
+        user_id = int(data.get('user_id', 0))
+        currency = request.match_info['currency'].upper()
+        
+        if not user_id:
+            return set_cors(web.json_response({"error": "Missing user_id"}, status=400))
+            
+        from src.database import users_collection
+        
+        update_fields = {}
+        if 'title' in data: update_fields[f"balances.{currency}.title"] = data['title']
+        if 'emoji' in data: update_fields[f"balances.{currency}.emoji"] = data['emoji']
+        if 'color' in data: update_fields[f"balances.{currency}.color"] = data['color']
+        if 'limit' in data: update_fields[f"balances.{currency}.limit"] = data['limit']
+        
+        if not update_fields:
+            return set_cors(web.json_response({"error": "No fields to update"}, status=400))
+            
+        await users_collection.update_one(
+            {"telegram_id": user_id},
+            {"$set": update_fields}
+        )
+        
+        return set_cors(web.json_response({"success": True}))
+    except Exception as e:
+        logger.error(f"Error updating balance: {e}")
         return set_cors(web.json_response({"error": "Server error"}, status=500))
 
 @routes.get('/api/balances/{currency}/check_delete')
@@ -1029,37 +1148,705 @@ async def remove_wallet_member_api(request):
 # ADMIN PANEL ROUTES
 # ═══════════════════════════════════════
 
-@routes.get('/admin')
-async def admin_page(request):
-    import os
-    path = os.path.join("webapp", "admin.html")
-    if os.path.exists(path):
-        return web.FileResponse(path)
-    return web.Response(text="Admin panel not found", status=404)
+import hashlib
+import secrets
 
-@routes.post('/api/admin/login')
-async def admin_login(request):
+# Simple token store (in-memory, resets on restart)
+_admin_tokens = set()
+_DEFAULT_PIN = "1973"
+
+
+def _generate_admin_token():
+    token = secrets.token_hex(32)
+    _admin_tokens.add(token)
+    return token
+
+
+def _verify_admin_token(request):
+    auth = request.headers.get("Authorization", "")
+    token = auth.replace("Bearer ", "")
+    return token in _admin_tokens
+
+
+async def _get_admin_pin():
+    """Bazadan PIN olish yoki default qaytarish."""
+    from src.database import db
+    settings = await db["admin_settings"].find_one({"key": "pin"})
+    if settings:
+        return settings["value"]
+    return _DEFAULT_PIN
+
+
+async def _set_admin_pin(new_pin: str):
+    """Bazaga yangi PIN yozish."""
+    from src.database import db
+    await db["admin_settings"].update_one(
+        {"key": "pin"},
+        {"$set": {"key": "pin", "value": new_pin}},
+        upsert=True
+    )
+
+
+@routes.post('/api/admin/pin-verify')
+async def admin_pin_verify(request):
+    """PIN tekshirish → token qaytarish."""
     try:
         data = await request.json()
-        if data.get("login") == "1342b" and data.get("password") == "gsk1352":
-            # Very simple static token for MVP
-            return set_cors(web.json_response({"success": True, "token": "admin_secure_token_123"}))
-        return set_cors(web.json_response({"success": False, "error": "Invalid credentials"}, status=401))
+        pin = data.get("pin", "")
+        stored_pin = await _get_admin_pin()
+        
+        # Determine IP Address
+        client_ip = request.headers.get('X-Forwarded-For') or request.headers.get('X-Real-IP') or request.remote
+        logger.warning(f"Admin PIN Verify Attempt from IP: {client_ip}")
+        
+        if pin == stored_pin:
+            token = _generate_admin_token()
+            logger.info(f"Admin PIN Verify SUCCESS from IP: {client_ip}")
+            return set_cors(web.json_response({"success": True, "token": token}))
+            
+        logger.warning(f"Admin PIN Verify FAILED from IP: {client_ip}")
+        return set_cors(web.json_response({"success": False, "error": "Wrong PIN"}, status=401))
     except Exception as e:
         return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.post('/api/admin/pin-change')
+async def admin_pin_change(request):
+    """PIN o'zgartirish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        data = await request.json()
+        old_pin = data.get("old_pin", "")
+        new_pin = data.get("new_pin", "")
+        
+        stored_pin = await _get_admin_pin()
+        if old_pin != stored_pin:
+            return set_cors(web.json_response({"success": False, "error": "Old PIN is wrong"}))
+        if len(new_pin) != 4 or not new_pin.isdigit():
+            return set_cors(web.json_response({"success": False, "error": "PIN must be 4 digits"}))
+        
+        await _set_admin_pin(new_pin)
+        return set_cors(web.json_response({"success": True}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.get('/api/admin/dashboard')
+async def admin_dashboard(request):
+    """Dashboard statistikalari."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import get_bot_statistics, get_advanced_dashboard_stats, users_collection
+        stats = await get_bot_statistics()
+        adv_stats = await get_advanced_dashboard_stats()
+        
+        # Til statistikasi
+        lang_pipeline = [
+            {"$group": {"_id": "$language", "count": {"$sum": 1}}}
+        ]
+        lang_stats = await users_collection.aggregate(lang_pipeline).to_list(10)
+        langs = {item["_id"] or "uz": item["count"] for item in lang_stats}
+        
+        stats["lang_breakdown"] = langs
+        
+        # Daromad darajalari statistikasi
+        from src.database import financial_history_collection
+        income_pipeline = [
+            {"$group": {"_id": "$income_level", "count": {"$sum": 1}}}
+        ]
+        income_stats_raw = await financial_history_collection.aggregate(income_pipeline).to_list(10)
+        
+        total_income = sum(item["count"] for item in income_stats_raw)
+        income_levels = {"low": 0, "medium": 0, "high": 0}
+        if total_income > 0:
+            for item in income_stats_raw:
+                if item["_id"] in income_levels:
+                    income_levels[item["_id"]] = round((item["count"] / total_income) * 100)
+                    
+        stats["income_levels"] = income_levels
+        
+        # Qiziqishlar statistikasi
+        interest_pipeline = [
+            {"$unwind": "$interests"},
+            {"$group": {"_id": "$interests", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        interest_stats_raw = await users_collection.aggregate(interest_pipeline).to_list(20)
+        total_users_count = stats.get("total_users", 1) or 1
+        interest_stats = {}
+        for item in interest_stats_raw:
+            if item["_id"]:
+                interest_stats[item["_id"]] = round((item["count"] / total_users_count) * 100)
+        stats["interest_stats"] = interest_stats
+        
+        # Merge advanced stats
+        stats.update(adv_stats)
+        
+        return set_cors(web.json_response(stats))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
 
 @routes.get('/api/admin/users')
 async def admin_get_users(request):
-    auth = request.headers.get("Authorization", "")
-    if auth != "Bearer admin_secure_token_123":
+    """Foydalanuvchilar ro'yxati."""
+    if not _verify_admin_token(request):
         return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
-        
-    from src.database import get_admin_users_data
     try:
-        users = await get_admin_users_data()
+        from src.database import users_collection
+        cursor = users_collection.find(
+            {},
+            {"_id": 0, "telegram_id": 1, "full_name": 1, "username": 1,
+             "phone_number": 1, "language": 1, "age_group": 1,
+             "country": 1, "region": 1, "timezone": 1,
+             "interests": 1, "is_active": 1, "created_at": 1,
+             "last_active": 1, "registration_complete": 1,
+             "segmentation_stage": 1, "gender": 1}
+        ).sort("created_at", -1)
+        users = await cursor.to_list(length=5000)
+        
+        for u in users:
+            if "created_at" in u and u["created_at"]:
+                u["created_at"] = u["created_at"].isoformat()
+            if "last_active" in u and u["last_active"]:
+                u["last_active"] = u["last_active"].isoformat()
+        
         return set_cors(web.json_response(users))
     except Exception as e:
         return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/users/{telegram_id}')
+async def admin_get_user_detail(request):
+    """Bitta userning barcha tafsilotlarini qaytaradi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        telegram_id = int(request.match_info['telegram_id'])
+        from src.database import get_admin_user_detail
+        user_detail = await get_admin_user_detail(telegram_id)
+        if not user_detail:
+            return set_cors(web.json_response({"error": "User topilmadi"}, status=404))
+        return set_cors(web.json_response(user_detail))
+    except ValueError:
+        return set_cors(web.json_response({"error": "Invalid telegram_id"}, status=400))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.put('/api/admin/users/{telegram_id}/gender')
+async def admin_update_gender(request):
+    """Userning jinsini o'zgartiradi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        telegram_id = int(request.match_info['telegram_id'])
+        data = await request.json()
+        new_gender = data.get("gender")
+        if new_gender not in ["male", "female", "unknown"]:
+            return set_cors(web.json_response({"error": "Noto'g'ri jins"}, status=400))
+            
+        from src.database import users_collection
+        res = await users_collection.update_one(
+            {"telegram_id": telegram_id},
+            {"$set": {"gender": new_gender}}
+        )
+        if res.matched_count == 0:
+            return set_cors(web.json_response({"error": "User topilmadi"}, status=404))
+        return set_cors(web.json_response({"success": True}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.delete('/api/admin/users/{telegram_id}/financial-history/{history_id}')
+async def admin_delete_financial_history(request):
+    """Userning daromad tarixini butunlay o'chirib yuboradi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        telegram_id = int(request.match_info['telegram_id'])
+        history_id = request.match_info['history_id']
+        
+        from src.database import financial_history_collection
+        from bson import ObjectId
+        
+        res = await financial_history_collection.delete_one({
+            "_id": ObjectId(history_id),
+            "telegram_id": telegram_id
+        })
+        
+        if res.deleted_count == 0:
+            return set_cors(web.json_response({"error": "Tarix topilmadi"}, status=404))
+            
+        return set_cors(web.json_response({"success": True}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.post('/api/admin/users/{telegram_id}/ai-summary')
+async def admin_user_ai_summary(request):
+    """Groq API yordamida foydalanuvchining psixologik-moliyaviy tahlilini qaytaradi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        telegram_id = int(request.match_info['telegram_id'])
+        from src.database import get_admin_user_detail
+        user = await get_admin_user_detail(telegram_id)
+        if not user:
+            return set_cors(web.json_response({"error": "User topilmadi"}, status=404))
+            
+        from src.services.groq_service import process_text_groq
+        
+        # Build prompt
+        prompt = f"""
+Sen malakali moliyaviy tahlilchi va psixologsan. 
+Quyidagi foydalanuvchi haqidagi ma'lumotlarga asoslanib, uning qisqacha (3-4 ta gapdan iborat) o'zbek tilida tahlilini (AI Xulosasini) yozib ber. Foydalanuvchining daromad darajasi, yoshi, eng ko'p xarajat qiladigan sohasi va qiziqishlariga asoslanib uning ehtimoliy kimligi (kasbi yoki hayot tarzi) haqida taxmin qil va qanday moliyaviy taklif yoki mahsulot unga to'g'ri kelishini maslahat ber.
+
+Ma'lumotlar:
+- Yosh guruhi: {user['segment']['age_group']}
+- Jinsi: {user['segment']['gender']}
+- Yashash joyi: {user['segment']['region']}, {user['segment']['location']}
+- Qiziqishlari: {', '.join(user['segment']['interests']) if user['segment']['interests'] else 'Noma\'lum'}
+- O'rtacha oylik daromadi: {user['financial']['avg_income']} UZS
+- O'rtacha oylik xarajati: {user['financial']['avg_expense']} UZS
+- Eng ko'p pul sarflaydigan kategoriya: {user['financial']['top_expense_cat']}
+
+Tahlil faqat matn ko'rinishida bo'lsin, hech qanday formatlashsiz (boldlarsiz, markdownlarsiz).
+"""
+        summary_text = await process_text_groq(prompt)
+        return set_cors(web.json_response({"summary": summary_text}))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.get('/api/admin/segments')
+async def admin_segments(request):
+    """Segmentatsiya statistikasi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import users_collection
+        
+        # Yosh guruhlari
+        age_pipeline = [
+            {"$match": {"age_group": {"$exists": True, "$ne": None}}},
+            {"$group": {"_id": "$age_group", "count": {"$sum": 1}}},
+            {"$sort": {"_id": 1}}
+        ]
+        age_stats = await users_collection.aggregate(age_pipeline).to_list(20)
+        
+        # Davlatlar
+        country_pipeline = [
+            {"$match": {"country": {"$exists": True, "$ne": None}}},
+            {"$group": {"_id": "$country", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        country_stats = await users_collection.aggregate(country_pipeline).to_list(50)
+        
+        # Viloyatlar
+        region_pipeline = [
+            {"$match": {"region": {"$exists": True, "$ne": None}}},
+            {"$group": {"_id": "$region", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        region_stats = await users_collection.aggregate(region_pipeline).to_list(50)
+        
+        # Qiziqishlar
+        interest_pipeline = [
+            {"$match": {"interests": {"$exists": True, "$ne": []}}},
+            {"$unwind": "$interests"},
+            {"$group": {"_id": "$interests", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        interest_stats = await users_collection.aggregate(interest_pipeline).to_list(50)
+        
+        # Segmentatsiya bosqichlari
+        stage_pipeline = [
+            {"$group": {"_id": "$segmentation_stage", "count": {"$sum": 1}}}
+        ]
+        stage_stats = await users_collection.aggregate(stage_pipeline).to_list(10)
+        
+        return set_cors(web.json_response({
+            "age_groups": [{"label": s["_id"], "count": s["count"]} for s in age_stats],
+            "countries": [{"label": s["_id"], "count": s["count"]} for s in country_stats],
+            "regions": [{"label": s["_id"], "count": s["count"]} for s in region_stats],
+            "interests": [{"label": s["_id"], "count": s["count"]} for s in interest_stats],
+            "stages": {str(s["_id"]): s["count"] for s in stage_stats},
+        }))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.post('/api/admin/segments/filter')
+async def admin_filter_segments(request):
+    """Tanlangan filtrlar asosida aniq segment ma'lumotlarini qaytaradi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        filters = await request.json()
+        from src.database import get_filtered_segment_data
+        
+        # Example filters payload:
+        # {
+        #   "age_groups": ["18-24", "25-34"],
+        #   "genders": ["Erkak"],
+        #   "countries": ["O'zbekiston"],
+        #   "regions": ["Toshkent"],
+        #   "languages": ["uz"],
+        #   "interests": ["Sport"],
+        #   "income_levels": ["Yuqori"]
+        # }
+        
+        data = await get_filtered_segment_data(filters)
+        return set_cors(web.json_response(data))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/channel-stats')
+async def admin_channel_stats(request):
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+        
+    link = request.query.get("link")
+    if not link:
+        return set_cors(web.json_response({"error": "Missing link parameter"}, status=400))
+        
+    try:
+        from src.database import get_admin_channel_stats
+        data = await get_admin_channel_stats(link)
+        return set_cors(web.json_response(data))
+    except Exception as e:
+        logger.error(f"Channel stats error: {e}")
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.get('/api/admin/channels')
+async def admin_get_channels(request):
+    """Kanallar ro'yxati."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import get_all_channels
+        channels = await get_all_channels()
+        result = []
+        for ch in channels:
+            result.append({
+                "id": str(ch["_id"]),
+                "name": ch.get("name", ""),
+                "link": ch.get("link", ""),
+            })
+        return set_cors(web.json_response(result))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.get('/api/admin/channels/extended')
+async def admin_get_channels_extended(request):
+    """Kanallar ro'yxati va ularning statistikasi."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import get_all_channels, users_collection
+        bot = request.app.get('bot')
+        channels = await get_all_channels()
+        
+        # Jami bot foydalanuvchilari soni (konversiya uchun)
+        total_users = await users_collection.count_documents({"is_active": True})
+        
+        result = []
+        for ch in channels:
+            link = ch.get("link", "")
+            username = link.split("t.me/")[-1] if "t.me/" in link else link
+            if not username.startswith("@"):
+                username = f"@{username}"
+            
+            member_count = 0
+            is_admin = False
+            
+            if bot:
+                try:
+                    member_count = await bot.get_chat_member_count(chat_id=username)
+                    bot_member = await bot.get_chat_member(chat_id=username, user_id=bot.id)
+                    if bot_member.status in ["administrator", "creator"]:
+                        is_admin = True
+                except Exception as e:
+                    print(f"Error fetching channel stats for {username}: {e}")
+            
+            # Simple conversion mock
+            joined_via_bot = total_users
+            conversion = min(100, int((joined_via_bot / max(1, member_count)) * 100)) if member_count > 0 else 0
+            
+            result.append({
+                "id": str(ch["_id"]),
+                "name": ch.get("name", username),
+                "username": username,
+                "link": link,
+                "member_count": member_count,
+                "is_admin": is_admin,
+                "joined_via_bot": joined_via_bot,
+                "conversion": conversion
+            })
+            
+        return set_cors(web.json_response(result))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.post('/api/admin/channels/verify_add')
+async def admin_add_channel_verify(request):
+    """Kanalni tekshirib qo'shish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        data = await request.json()
+        username = data.get("username", "").strip()
+        
+        if not username:
+            return set_cors(web.json_response({"error": "Username is required"}, status=400))
+            
+        if not username.startswith("@"):
+            username = f"@{username}"
+            
+        bot = request.app.get('bot')
+        if not bot:
+            return set_cors(web.json_response({"error": "Bot not available"}, status=500))
+            
+        # Verify bot is admin
+        try:
+            bot_member = await bot.get_chat_member(chat_id=username, user_id=bot.id)
+            if bot_member.status not in ["administrator", "creator"]:
+                return set_cors(web.json_response({"success": False, "error": "Bot bu kanalda admin emas! Avval botni admin qiling."}))
+        except Exception as e:
+            return set_cors(web.json_response({"success": False, "error": f"Kanal topilmadi yoki bot u yerda umuman yo'q. Avval botni admin qiling."}))
+            
+        link = f"https://t.me/{username[1:]}"
+        
+        # Try to get channel title
+        try:
+            chat = await bot.get_chat(chat_id=username)
+            name = chat.title or username
+        except:
+            name = username
+        
+        from src.database import add_channel
+        success = await add_channel(link, name)
+        if success:
+            return set_cors(web.json_response({"success": True}))
+        return set_cors(web.json_response({"success": False, "error": "Kanal allaqachon mavjud."}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.delete('/api/admin/channels/{channel_id}')
+async def admin_delete_channel(request):
+    """Kanal o'chirish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from bson import ObjectId
+        from src.database import channels_collection
+        channel_id = request.match_info['channel_id']
+        result = await channels_collection.delete_one({"_id": ObjectId(channel_id)})
+        if result.deleted_count > 0:
+            return set_cors(web.json_response({"success": True}))
+        return set_cors(web.json_response({"success": False, "error": "Not found"}, status=404))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+import uuid
+from datetime import datetime
+import asyncio
+
+async def process_broadcast_job(job_id: str, users: list, text: str, bot, target: str):
+    from src.database import save_broadcast_job
+    
+    total = len(users)
+    sent = 0
+    failed = 0
+    
+    job_data = {
+        "text": text,
+        "target": target,
+        "total": total,
+        "sent": 0,
+        "failed": 0,
+        "status": "running",
+        "created_at": datetime.utcnow()
+    }
+    await save_broadcast_job(job_id, job_data)
+    
+    for u in users:
+        try:
+            await bot.send_message(chat_id=u["telegram_id"], text=text)
+            sent += 1
+        except Exception:
+            failed += 1
+            
+        # Update progress in DB periodically
+        if (sent + failed) % 20 == 0:
+            await save_broadcast_job(job_id, {"status": "running", "sent": sent, "failed": failed})
+            
+        await asyncio.sleep(0.05) # Rate limit protection
+        
+    await save_broadcast_job(job_id, {
+        "status": "completed",
+        "sent": sent,
+        "failed": failed
+    })
+
+
+@routes.post('/api/admin/broadcast')
+async def admin_broadcast(request):
+    """Orqa fonda barcha yoki segment/userga xabar yuborish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        data = await request.json()
+        text = data.get("text", "").strip()
+        target_mode = data.get("mode", "all") # "all", "segment", "user"
+        filters = data.get("filters", None)
+        single_user_id = data.get("single_user_id", None)
+        
+        if not text:
+            return set_cors(web.json_response({"error": "Text is required"}, status=400))
+        
+        from src.database import users_collection
+        bot = request.app.get('bot')
+        if not bot:
+            return set_cors(web.json_response({"error": "Bot not available"}, status=500))
+            
+        # Build query
+        query = {"is_active": True}
+        target_label = "Barcha"
+        
+        if target_mode == "user" and single_user_id:
+            try:
+                single_user_id = int(single_user_id)
+                query["telegram_id"] = single_user_id
+                target_label = f"User: {single_user_id}"
+            except ValueError:
+                return set_cors(web.json_response({"error": "Invalid telegram_id"}, status=400))
+        elif target_mode == "segment" and filters:
+            target_label = "Segment"
+            if filters.get("age_groups") and len(filters["age_groups"]) > 0:
+                query["age_group"] = {"$in": filters["age_groups"]}
+            if filters.get("genders") and len(filters["genders"]) > 0:
+                query["gender"] = {"$in": filters["genders"]}
+            if filters.get("countries") and len(filters["countries"]) > 0:
+                query["country"] = {"$in": filters["countries"]}
+            if filters.get("regions") and len(filters["regions"]) > 0:
+                query["region"] = {"$in": filters["regions"]}
+            if filters.get("languages") and len(filters["languages"]) > 0:
+                query["language"] = {"$in": filters["languages"]}
+            if filters.get("interests") and len(filters["interests"]) > 0:
+                query["interests"] = {"$in": filters["interests"]}
+        
+        cursor = users_collection.find(query, {"telegram_id": 1})
+        users = await cursor.to_list(length=100000)
+        
+        if len(users) == 0:
+            return set_cors(web.json_response({"error": "No users found for this target."}, status=404))
+            
+        job_id = str(uuid.uuid4())
+        
+        # Start background task
+        asyncio.create_task(process_broadcast_job(job_id, users, text, bot, target_label))
+        
+        return set_cors(web.json_response({"success": True, "job_id": job_id, "total": len(users)}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/broadcast/status/{job_id}')
+async def admin_broadcast_status(request):
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        job_id = request.match_info['job_id']
+        from src.database import get_broadcast_job
+        job = await get_broadcast_job(job_id)
+        if not job:
+            return set_cors(web.json_response({"error": "Job not found"}, status=404))
+            
+        if "created_at" in job:
+            job["created_at"] = job["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+        job["_id"] = str(job["_id"])
+            
+        return set_cors(web.json_response(job))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/broadcast/history')
+async def admin_broadcast_history(request):
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import get_broadcast_history
+        history = await get_broadcast_history(10)
+        return set_cors(web.json_response(history))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
+@routes.post('/api/admin/ai-chat/stream')
+async def admin_ai_chat_stream(request):
+    """AI bilan streaming orqali gaplashish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    
+    try:
+        data = await request.json()
+        message = data.get("message", "").strip()
+        history = data.get("history", [])
+        
+        if not message:
+            return set_cors(web.json_response({"error": "Message is required"}, status=400))
+        
+        from src.database import get_filtered_segment_data
+        import json
+        # Jami statistika
+        stats = await get_filtered_segment_data({})
+        if "users" in stats:
+            del stats["users"] # save tokens
+            
+        system_prompt = f"""Sen Somly AI Admin Assistant san. Senda butun bazadagi agregatsiya qilingan ma'lumotlar bor.
+QOIDALAR:
+1. Maxfiylik: Foydalanuvchilarning shaxsiy tranzaksiyalarini aniq ko'rsatma, faqat umumiy va o'rtacha holatni tahlil qil.
+2. Reklama maslahati: Agar admin qaysi segmentga reklama berish haqida so'rasa, darhol javob bermasdan, avval admindan brif savollarini so'ra (qanday reklama, mahsulot qayerda joylashgan, h.k.). Savollarni matn ko'rinishida variantlar bilan, chiroyli ro'yxat qilib ber.
+3. Statistika: Senga berilgan JSON dan foydalanib eng aniq ma'lumotlarni ber (masalan eng faol yosh, eng ko'p xarajat qilingan kategoriya).
+4. Doim professional va o'zbek tilida javob ber.
+
+STATISTIKA KONTEKSTI:
+{json.dumps(stats, ensure_ascii=False)}
+"""
+
+        messages = [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": message}]
+        
+        response = web.StreamResponse(
+            status=200,
+            reason='OK',
+            headers={
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+                'Access-Control-Allow-Origin': '*'
+            }
+        )
+        await response.prepare(request)
+        
+        from src.services.groq_service import groq_service
+        async for chunk in groq_service.stream_chat_completion_with_retry(messages, temperature=0.7, max_tokens=1500):
+            await response.write(chunk.encode('utf-8'))
+            
+        await response.write_eof()
+        return response
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # Fallback to normal error response if not prepared yet
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
 
 # ─── REFERRAL ENDPOINTS ───
 
@@ -1077,8 +1864,7 @@ async def get_user_referrals(request):
 
 @routes.get('/api/admin/referrals')
 async def get_admin_referrals(request):
-    auth = request.headers.get("Authorization", "")
-    if auth != "Bearer admin_secure_token_123":
+    if not _verify_admin_token(request):
         return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
         
     try:
@@ -1120,6 +1906,80 @@ async def error_middleware(app, handler):
     return middleware_handler
 
 
+@routes.get('/api/admin/settings')
+async def admin_get_settings(request):
+    """Admin sozlamalarini olish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.database import db
+        settings_cursor = db["admin_settings"].find({})
+        settings_list = await settings_cursor.to_list(length=50)
+        
+        result = {}
+        for s in settings_list:
+            result[s["key"]] = s["value"]
+        
+        # Defaults
+        defaults = {
+            "morning_reminder": "09:00",
+            "afternoon_reminder": "15:00",
+            "evening_reminder": "21:00",
+            "monthly_summary_day": 1,
+            "monthly_summary_time": "09:00",
+            "segment_min_hours": 1,
+            "segment_max_hours": 4,
+            "interest_freq": "1w",
+        }
+        for k, v in defaults.items():
+            if k not in result:
+                result[k] = v
+                
+        return set_cors(web.json_response(result))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.put('/api/admin/settings')
+async def admin_update_settings(request):
+    """Admin sozlamalarini saqlash."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        data = await request.json()
+        from src.database import db
+        
+        for key, value in data.items():
+            await db["admin_settings"].update_one(
+                {"key": key},
+                {"$set": {"key": key, "value": value}},
+                upsert=True
+            )
+        
+        return set_cors(web.json_response({"success": True}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+@routes.get('/api/admin/groq-status')
+async def admin_groq_status(request):
+    """Groq API kalitlari holatini ko'rsatish."""
+    if not _verify_admin_token(request):
+        return set_cors(web.json_response({"error": "Unauthorized"}, status=401))
+    try:
+        from src.services.groq_service import groq_service
+        keys_info = []
+        for ks in groq_service.keys_stats:
+            keys_info.append({
+                "index": ks.index + 1,
+                "status": ks.status,
+                "total_requests": ks.total_requests,
+                "total_errors": ks.total_errors,
+                "connection_errors": ks.connection_errors,
+            })
+        return set_cors(web.json_response({"keys": keys_info}))
+    except Exception as e:
+        return set_cors(web.json_response({"error": str(e)}, status=500))
+
+
 async def on_shutdown(app):
     """Graceful shutdown: Notify all WebSockets before closing."""
     logger.info("Server shutting down, broadcasting to all WebSockets...")
@@ -1130,9 +1990,30 @@ async def start_api_server(bot=None):
     app = web.Application(middlewares=[error_middleware])
     app['bot'] = bot
     app.add_routes(routes)
+    
+    # ── Serve React Frontend in Production ──
+    webapp_dir = os.path.join(os.getcwd(), 'webapp', 'dist')
+    if os.path.exists(webapp_dir):
+        # Serve assets directory
+        assets_dir = os.path.join(webapp_dir, 'assets')
+        if os.path.exists(assets_dir):
+            app.router.add_static('/assets/', path=assets_dir, name='assets')
+        
+        # Serve public files manually or add generic static (we just need index.html to catch-all)
+        async def spa_handler(request):
+            # If requesting a specific file that exists (like favicon.ico, somly.jpg)
+            file_path = os.path.join(webapp_dir, request.path.lstrip('/'))
+            if os.path.isfile(file_path):
+                return web.FileResponse(file_path)
+            # Otherwise, return index.html for React Router
+            return web.FileResponse(os.path.join(webapp_dir, 'index.html'))
+            
+        app.router.add_get('/{tail:.*}', spa_handler)
+        
     app.on_shutdown.append(on_shutdown)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    port = int(os.environ.get("PORT", 8000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info("🌐 API Server is running on http://0.0.0.0:8000")
+    logger.info(f"🌐 API Server is running on http://0.0.0.0:{port}")

@@ -458,6 +458,85 @@ async def check_custom_reminders(bot: Bot):
         logger.error(f"Error checking custom reminders: {e}")
 
 
+# ═══════════════════════════════════════
+# OYLIK DAROMAD DARAJASINI HISOBLASH
+# ═══════════════════════════════════════
+async def calculate_monthly_income_levels(bot: Bot):
+    logger.info("Starting monthly income level calculation...")
+    from src.database import transactions_collection, financial_history_collection
+    
+    now = datetime.utcnow()
+    # Calculate for the previous month
+    first_day_of_current_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_day_of_prev_month = first_day_of_current_month - timedelta(days=1)
+    first_day_of_prev_month = last_day_of_prev_month.replace(day=1)
+    
+    month_str = last_day_of_prev_month.strftime("%Y-%m")
+    
+    # Check if we already calculated for this month
+    existing = await financial_history_collection.count_documents({"month": month_str})
+    if existing > 0:
+        logger.info(f"Income history for {month_str} already exists. Skipping.")
+        return
+        
+    pipeline = [
+        {"$match": {
+            "created_at": {"$gte": first_day_of_prev_month, "$lt": first_day_of_current_month},
+            "affects_balance": True
+        }},
+        {"$group": {
+            "_id": {"telegram_id": "$telegram_id", "type": "$type"},
+            "total_amount": {"$sum": "$amount"},
+            "count": {"$sum": 1}
+        }},
+        {"$group": {
+            "_id": "$_id.telegram_id",
+            "types": {"$push": {"type": "$_id.type", "amount": "$total_amount", "count": "$count"}}
+        }}
+    ]
+    
+    results = await transactions_collection.aggregate(pipeline).to_list(length=None)
+    histories_to_insert = []
+    
+    for user_data in results:
+        telegram_id = user_data["_id"]
+        
+        income_sum = 0
+        expense_sum = 0
+        income_count = 0
+        
+        for t in user_data["types"]:
+            if t["type"] == "kirim":
+                income_sum = float(t["amount"])
+                income_count = t["count"]
+            elif t["type"] == "chiqim":
+                expense_sum = float(t["amount"])
+                
+        if income_count >= 2:
+            level = "unknown"
+            if income_sum < 2000000:
+                level = "low"
+            elif 2000000 <= income_sum <= 6000000:
+                level = "medium"
+            else:
+                level = "high"
+                
+            histories_to_insert.append({
+                "telegram_id": telegram_id,
+                "month": month_str,
+                "avg_income": income_sum,
+                "avg_expense": expense_sum,
+                "income_level": level,
+                "calculated_at": datetime.utcnow()
+            })
+            
+    if histories_to_insert:
+        await financial_history_collection.insert_many(histories_to_insert)
+        logger.info(f"Inserted {len(histories_to_insert)} income history records for {month_str}")
+    else:
+        logger.info(f"No valid income history found for {month_str}")
+
+
 def setup_scheduler(bot: Bot):
     global _bot_ref
     _bot_ref = bot
@@ -503,7 +582,104 @@ def setup_scheduler(bot: Bot):
     # Har daqiqada eslatmalarni tekshirish
     scheduler.add_job(check_pending_reminders, trigger="interval", minutes=1, args=[bot], id="check_pending_reminders", replace_existing=True)
     
+    # Segmentatsiya savollarini tekshirish (har 5 daqiqada)
+    scheduler.add_job(check_segmentation_questions, trigger="interval", minutes=5, args=[bot], id="segmentation_questions", replace_existing=True)
+    
+    # Har oyning 1-kuni soat 01:00 da daromad tarixini hisoblash
+    scheduler.add_job(calculate_monthly_income_levels, trigger="cron", day=1, hour=1, minute=0, args=[bot], id="monthly_income_levels", replace_existing=True)
+
+    from src.services.scheduler import check_channel_subscriptions_job
+    scheduler.add_job(check_channel_subscriptions_job, trigger="cron", hour=4, minute=0, args=[bot], id="check_channel_subs", replace_existing=True)
+
     scheduler.start()
+    logger.info("Background scheduler started.")
+
+
+# ═══════════════════════════════════════
+# KANAL OBUNALARINI TEKSHIRISH (HAR KUNI)
+# ═══════════════════════════════════════
+async def check_channel_subscriptions_job(bot: Bot):
+    """
+    Har 24 soatda ishlaydi, obunasi tasdiqlangan userlarni kanaldan chiqqan-chiqmaganini tekshiradi.
+    """
+    from src.database import channel_subscriptions_collection, mark_channel_left
+    
+    # Faqat tasdiqlangan obunalarni tekshiramiz
+    cursor = channel_subscriptions_collection.find({"confirmed": True})
+    records = await cursor.to_list(length=100000)
+    
+    for r in records:
+        user_id = r["user_id"]
+        link = r["channel_link"]
+        
+        chat_identifier = link
+        if "t.me/" in link and "+" not in link:
+            username = link.split("t.me/")[1].split("/")[0]
+            chat_identifier = f"@{username}"
+            
+        try:
+            member = await bot.get_chat_member(chat_id=chat_identifier, user_id=user_id)
+            if member.status in ["left", "kicked", "restricted"]:
+                await mark_channel_left(user_id, link)
+        except Exception as e:
+            logger.warning(f"Background sub check failed for {chat_identifier} user {user_id}: {e}")
+
+
+# ═══════════════════════════════════════
+# XAVFSIZLIK: GROQ API KALITLARINI TEKSHIRISH
+# ═══════════════════════════════════════
+async def check_segmentation_questions(bot: Bot):
+    """Har 5 daqiqada segmentation savollari kerak bo'lgan userlarni tekshiradi.
+    Faqat 09:00–21:00 (UTC+5) oralig'ida yuboradi."""
+    from src.database import get_pending_segmentation_users, users_collection
+    from src.handlers.segment_handler import build_age_keyboard, build_country_keyboard
+    from src.services.i18n import t
+    import random
+
+    try:
+        users = await get_pending_segmentation_users()
+        if not users:
+            return
+
+        for user in users:
+            telegram_id = user["telegram_id"]
+            lang = user.get("language", "uz")
+            stage = user.get("segmentation_stage", 0)
+
+            try:
+                if stage == 0:
+                    # 1-SAVOL: YOSH
+                    kb = build_age_keyboard(lang)
+                    await bot.send_message(
+                        chat_id=telegram_id,
+                        text=t(lang, "seg_age_question"),
+                        reply_markup=kb
+                    )
+                    logger.info(f"Sent age question to user {telegram_id}")
+
+                elif stage == 1:
+                    # 2-SAVOL: JOYLASHUV
+                    kb = build_country_keyboard(lang)
+                    await bot.send_message(
+                        chat_id=telegram_id,
+                        text=t(lang, "seg_location_question"),
+                        reply_markup=kb
+                    )
+                    logger.info(f"Sent location question to user {telegram_id}")
+
+                # Agar javob bermasa, keyingi tekshiruvda yana 1-4 soatdan keyin qayta yuborish
+                delay_hours = random.uniform(1, 4)
+                next_time = datetime.utcnow() + timedelta(hours=delay_hours)
+                await users_collection.update_one(
+                    {"telegram_id": telegram_id},
+                    {"$set": {"next_segment_time": next_time}}
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to send segmentation question to {telegram_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in check_segmentation_questions: {e}")
 
 
 # ═══════════════════════════════════════
@@ -566,7 +742,7 @@ async def check_daily_reports(bot: Bot):
         try:
             # ─── BALANSLAR ───
             balance_section = []
-            emojis = {"UZS": "🟢", "USD": "🟡", "Humo": "🟣"}
+            emojis = {"UZS": "🟢", "USD": "🟡"}
             
             for currency, bal_data in balances.items():
                 emoji = emojis.get(currency, "💵")

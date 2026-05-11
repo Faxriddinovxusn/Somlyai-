@@ -107,12 +107,12 @@ const Sidebar = () => {
 
       {/* Profile Section */}
       <div className="sidebar-divider"></div>
-      <Link to="/settings" style={{ textDecoration: 'none' }}>
+      <Link to="/profile" style={{ textDecoration: 'none' }}>
         <div className="sidebar-profile">
           <div className="avatar">{initials}</div>
           <div className="profile-info">
             <div className="profile-name">{userName} {userLastName}</div>
-            <div className="profile-status">Sozlamalar</div>
+            <div className="profile-status">Profil va sozlamalar</div>
           </div>
         </div>
       </Link>

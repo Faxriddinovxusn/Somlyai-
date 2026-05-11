@@ -362,15 +362,14 @@ const ReportsPage = ({ initData }) => {
           onApply={(values) => {
             setFilters({ ...filters, balances: values });
             const names = values.length ? values.map(v => {
-              const nameMap = { 'uzcard': 'Uzcardddd', 'humo': 'Humo', 'usd': 'USD' };
+              const nameMap = { 'usd': 'USD' };
               return nameMap[v] || v;
             }).join(', ') : 'Barchasi';
             setFilterDisplay({ ...filterDisplay, balances: names });
             setActiveModal(null);
           }}
           options={[
-            { label: 'Uzcardddd', value: 'uzcard' },
-            { label: 'Humo', value: 'humo' },
+            { label: 'UZS', value: 'uzs' },
             { label: 'USD', value: 'usd' }
           ]}
           selected={filters.balances}
@@ -1160,8 +1159,7 @@ const EditModal = ({ tx, form, setForm, onClose, onSave }) => {
               }}
             >
               <option value="">Tanlang...</option>
-              <option value="Uzcardddd">Uzcardddd</option>
-              <option value="Humo">Humo</option>
+              <option value="UZS">UZS</option>
               <option value="USD">USD</option>
             </select>
           </div>

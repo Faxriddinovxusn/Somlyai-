@@ -1,26 +1,85 @@
 """
-Registration handler — Name + Phone collection.
+Registration handler — Name + Gender Detection + Phone collection.
 
-Handles:
-- Text name input
-- Voice name input (transcribed → AI extracts name)
-- Contact sharing via ReplyKeyboard
+Onboarding Flow Steps (handled here):
+- STEP 3: Name input (text or voice) → AI gender detection
+- STEP 4: Phone number via contact sharing
+- STEP 5: Channel subscription (handled by middleware)
+- STEP 6: First transaction prompt
 """
 
 import os
+import logging
 from aiogram import Router, F, Bot
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import (
+    Message, CallbackQuery,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 from aiogram.fsm.context import FSMContext
 from src.states import RegistrationStates
-from src.database import get_user, update_user_name, update_user_phone, update_user_demographics
+from src.database import (
+    get_user, update_user_name, update_user_phone,
+    update_user_gender, get_all_channels, update_user_channels_joined
+)
 from src.services.groq_service import groq_service
-from src.handlers.start_handler import t
+from src.services.i18n import t
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════
-# ISM QABUL QILISH (matn)
+# JINS ANIQLASH FUNKSIYASI
+# ═══════════════════════════════════════
+
+# O'zbek erkak ismlari ro'yxati
+MALE_NAMES = {
+    "jasur", "sardor", "husan", "bobur", "sherzod", "ulugbek", "anvar",
+    "behruz", "davron", "eldor", "farhod", "gafur", "hamid", "ilhom",
+    "jamshid", "kamoliddin", "laziz", "mansur", "nodir", "oybek",
+    "pulat", "qodir", "rustam", "sanjar", "tohir", "umid", "vohid",
+    "xurshid", "yusuf", "zafar", "abdulloh", "akbar", "alisher",
+    "baxtiyor", "dilshod", "erkin", "farrux", "giyos", "hasan",
+    "ismoil", "javlon", "kamol", "lochin", "mirzo", "nuriddin",
+    "obid", "parviz", "ravshan", "saidakbar", "temur", "ulfat",
+    "valijon", "xasan", "yorqin", "zahid", "aziz", "bahodir",
+    "doniyor", "elyor", "furqat", "hayot", "islom", "jaloliddin",
+    "komil", "lutfillo", "muxammad", "muhammad", "narzullo",
+    "ozodbek", "pahlavon", "rauf", "suxrob", "toxir", "umar",
+    "valijon", "xasan", "yorqin", "zahid", "aziz", "bahodir",
+}
+
+# O'zbek ayol ismlari ro'yxati
+FEMALE_NAMES = {
+    "dilnoza", "gulnora", "madina", "malika", "nilufar", "nodira",
+    "ozoda", "parizod", "ra'no", "sarvinoz", "shahlo", "zulfiya",
+    "barno", "dilorom", "feruza", "gavhar", "hulkar", "iroda",
+    "kamola", "lola", "mohira", "nafisa", "odinaxon", "parvin",
+    "robiya", "saodat", "tursunoy", "umida", "vasilaxon", "xurshida",
+    "yulduz", "ziyoda", "aziza", "barcha", "charos", "dildora",
+    "fotima", "gulsanam", "hilola", "irodaxon", "komila", "lobar",
+    "maftuna", "nasiba", "oydin", "parvina", "sabohat", "zilola",
+}
+
+
+def detect_gender_by_name(name: str) -> str:
+    """Ismdan jinsni aniqlash (local, AI ga murojaat qilmasdan)."""
+    name_lower = name.lower().strip().split()[0] if name else ""
+    if name_lower in MALE_NAMES:
+        return "male"
+    if name_lower in FEMALE_NAMES:
+        return "female"
+    # Qo'shimcha qoidalar
+    if name_lower.endswith(("xon", "oy", "gul", "noz", "niso")):
+        return "female"
+    if name_lower.endswith(("bek", "boy", "jon", "din", "llo")):
+        return "male"
+    return "unknown"
+
+
+# ═══════════════════════════════════════
+# 3-QADAM: ISM QABUL QILISH (matn)
 # ═══════════════════════════════════════
 @router.message(RegistrationStates.waiting_for_name, F.text)
 async def process_name_text(message: Message, state: FSMContext):
@@ -36,26 +95,31 @@ async def process_name_text(message: Message, state: FSMContext):
 
     username = message.from_user.username
     await update_user_name(user_id, name, username=username)
-    await state.set_state(RegistrationStates.waiting_for_age)
+    
+    # ════════════════════════════════════════════
+    # JINS ANIQLASH (AI ismdan)
+    # ════════════════════════════════════════════
+    gender = await groq_service.detect_gender(name)
+    await update_user_gender(user_id, gender)
+    logger.info(f"Gender detected for '{name}': {gender}")
 
-    # Yosh so'rash
+    # "🤝 Tanishganimdan xursandman, [Ism]!"
+    await message.answer(t(lang, "greeting_after_name", name=name))
+    
+    # ════════════════════════════════════════════
+    # 4-QADAM: TELEFON RAQAM SO'RASH
+    # ════════════════════════════════════════════
+    await state.set_state(RegistrationStates.waiting_for_contact)
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="18 - 25"), KeyboardButton(text="25 - 30")],
-            [KeyboardButton(text="30 - 35"), KeyboardButton(text="35 - 45")],
-            [KeyboardButton(text="45+")]
-        ],
+        keyboard=[[KeyboardButton(text=t(lang, "share_contact_btn"), request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
-    await message.answer(
-        t(lang, "ask_age"),
-        reply_markup=keyboard,
-    )
+    await message.answer(t(lang, "ask_contact"), reply_markup=keyboard)
 
 
 # ═══════════════════════════════════════
-# ISM QABUL QILISH (ovozli)
+# 3-QADAM: ISM QABUL QILISH (ovozli)
 # ═══════════════════════════════════════
 @router.message(RegistrationStates.waiting_for_name, F.voice)
 async def process_name_voice(message: Message, state: FSMContext, bot: Bot):
@@ -83,135 +147,40 @@ async def process_name_voice(message: Message, state: FSMContext, bot: Bot):
 
         username = message.from_user.username
         await update_user_name(user_id, name, username=username)
-        await state.set_state(RegistrationStates.waiting_for_age)
+        
+        # Jins aniqlash (AI orqali)
+        gender = await groq_service.detect_gender(name)
+        await update_user_gender(user_id, gender)
+        logger.info(f"Gender detected (voice) for '{name}': {gender}")
+        
         await status_msg.delete()
 
+        # "🤝 Tanishganimdan xursandman, [Ism]!"
+        await message.answer(t(lang, "greeting_after_name", name=name))
+        
+        # 4-QADAM: TELEFON RAQAM SO'RASH
+        await state.set_state(RegistrationStates.waiting_for_contact)
         keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="18 - 25"), KeyboardButton(text="25 - 30")],
-                [KeyboardButton(text="30 - 35"), KeyboardButton(text="35 - 45")],
-                [KeyboardButton(text="45+")]
-            ],
+            keyboard=[[KeyboardButton(text=t(lang, "share_contact_btn"), request_contact=True)]],
             resize_keyboard=True,
             one_time_keyboard=True,
         )
-        await message.answer(
-            t(lang, "ask_age"),
-            reply_markup=keyboard,
-        )
+        await message.answer(t(lang, "ask_contact"), reply_markup=keyboard)
 
     except Exception:
-        await status_msg.edit_text("❌ Ovozni tahlil qilib bo'lmadi. Iltimos, ismingizni matn sifatida yozing.")
+        error_msgs = {
+            "uz": "❌ Ovozni tahlil qilib bo'lmadi. Iltimos, ismingizni matn sifatida yozing.",
+            "ru": "❌ Не удалось распознать голос. Пожалуйста, напишите имя текстом.",
+            "en": "❌ Could not process voice. Please type your name instead."
+        }
+        await status_msg.edit_text(error_msgs.get(lang, error_msgs["uz"]))
     finally:
         if os.path.exists(local_path):
             os.remove(local_path)
 
 
 # ═══════════════════════════════════════
-# YOSH QABUL QILISH
-# ═══════════════════════════════════════
-@router.message(RegistrationStates.waiting_for_age, F.text)
-async def process_age(message: Message, state: FSMContext):
-    age = message.text.strip()
-    if age.startswith("/"): return
-    
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    lang = user.get("language", "uz")
-    
-    await update_user_demographics(user_id, age=age)
-    await state.set_state(RegistrationStates.waiting_for_location)
-    
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=t(lang, "btn_uzb")), KeyboardButton(text=t(lang, "btn_other_country"))]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await message.answer(t(lang, "ask_location"), reply_markup=keyboard)
-
-
-# ═══════════════════════════════════════
-# JOYLASHUV QABUL QILISH
-# ═══════════════════════════════════════
-@router.message(RegistrationStates.waiting_for_location, F.text)
-async def process_location(message: Message, state: FSMContext):
-    loc = message.text.strip()
-    if loc.startswith("/"): return
-    
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    lang = user.get("language", "uz")
-    
-    if loc == t(lang, "btn_uzb"):
-        await update_user_demographics(user_id, location="O'zbekiston")
-        await state.set_state(RegistrationStates.waiting_for_region)
-        
-        regions = ["Toshkent shahri", "Toshkent viloyati", "Andijon", "Buxoro", "Farg'ona", "Jizzax", "Xorazm", "Namangan", "Navoiy", "Qashqadaryo", "Qoraqalpog'iston", "Samarqand", "Sirdaryo", "Surxondaryo"]
-        kb_buttons = []
-        for i in range(0, len(regions), 2):
-            row = [KeyboardButton(text=regions[i])]
-            if i+1 < len(regions): row.append(KeyboardButton(text=regions[i+1]))
-            kb_buttons.append(row)
-            
-        keyboard = ReplyKeyboardMarkup(keyboard=kb_buttons, resize_keyboard=True, one_time_keyboard=True)
-        await message.answer(t(lang, "ask_region"), reply_markup=keyboard)
-    else:
-        await state.set_state(RegistrationStates.waiting_for_country)
-        await message.answer(t(lang, "ask_country_name"), reply_markup=ReplyKeyboardRemove())
-
-
-# ═══════════════════════════════════════
-# VILOYAT QABUL QILISH (UZB)
-# ═══════════════════════════════════════
-@router.message(RegistrationStates.waiting_for_region, F.text)
-async def process_region(message: Message, state: FSMContext):
-    region = message.text.strip()
-    if region.startswith("/"): return
-    
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    lang = user.get("language", "uz")
-    name = user.get("full_name", "")
-    
-    await update_user_demographics(user_id, region=region)
-    await state.set_state(RegistrationStates.waiting_for_contact)
-    
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=t(lang, "share_contact_btn"), request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await message.answer(t(lang, "ask_contact", name=name), reply_markup=keyboard)
-
-
-# ═══════════════════════════════════════
-# DAVLAT QABUL QILISH (BOSHQA DAVLAT)
-# ═══════════════════════════════════════
-@router.message(RegistrationStates.waiting_for_country, F.text)
-async def process_country(message: Message, state: FSMContext):
-    country = message.text.strip()
-    if country.startswith("/"): return
-    
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    lang = user.get("language", "uz")
-    name = user.get("full_name", "")
-    
-    await update_user_demographics(user_id, location=country, region="N/A")
-    await state.set_state(RegistrationStates.waiting_for_contact)
-    
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=t(lang, "share_contact_btn"), request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await message.answer(t(lang, "ask_contact", name=name), reply_markup=keyboard)
-
-
-# ═══════════════════════════════════════
-# CONTACT QABUL QILISH
+# 4-QADAM: CONTACT QABUL QILISH
 # ═══════════════════════════════════════
 @router.message(RegistrationStates.waiting_for_contact, F.contact)
 async def process_contact(message: Message, state: FSMContext):
@@ -238,50 +207,129 @@ async def process_contact(message: Message, state: FSMContext):
                     text=f"🎉 Do'stingiz Somly AI ga qo'shildi!\nEndi siz {stats} kishini taklif qildingiz 👍"
                 )
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Failed to notify referrer {referrer_id}: {e}")
+                logger.warning(f"Failed to notify referrer {referrer_id}: {e}")
 
     await state.clear()
     
-    from src.database import get_all_channels
+    # ═══ SEGMENTATSIYA BOSHLANISHI ═══
+    # Onboarding tugagandan keyin 1-4 soat ichida birinchi savol yuboriladi
+    from src.database import start_segmentation
+    await start_segmentation(user_id)
+    
+    # Reply keyboard olib tashlanadi
+    # "🎉 Tabriklayman, ro'yxatdan o'tib oldingiz!"
+    await message.answer(
+        t(lang, "registration_done"),
+        reply_markup=ReplyKeyboardRemove()
+    )
+    
+    # ════════════════════════════════════════════
+    # 5-QADAM: KANAL OBUNASI TEKSHIRUVI
+    # ════════════════════════════════════════════
     channels = await get_all_channels()
     
     if channels:
-        # Show channels right away
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        # Get webapp url for redirect
+        from src.database import db
+        settings = await db["admin_settings"].find_one({"key": "webapp_url"})
+        base_url = settings["value"] if settings else "https://somly.ai"
+        base_url = base_url.rstrip("/")
+        
+        # "Botdan bepul foydalanish uchun quyidagi kanalga obuna bo'ling 👇"
         buttons = []
         for ch in channels:
-            buttons.append([InlineKeyboardButton(text=f"📢 {ch['name']}", url=ch['link'])])
-            
-        check_texts = {
-            "uz": "✅ Davom etish",
-            "en": "✅ Continue",
-            "ru": "✅ Продолжить",
-        }
+            import urllib.parse
+            encoded_link = urllib.parse.quote(ch['link'])
+            redirect_url = f"{base_url}/api/redirect?c={encoded_link}&u={user_id}"
+            buttons.append([InlineKeyboardButton(text=f"📢 {ch['name']}", url=redirect_url)])
+        
         buttons.append([InlineKeyboardButton(
-            text=check_texts.get(lang, check_texts["uz"]),
-            callback_data="check_sub"
+            text=t(lang, "channel_check_btn"),
+            callback_data="check_sub_onboarding"
         )])
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         
-        header_texts = {
-            "uz": "📢 Foydali kanallarimiz:\n",
-            "en": "📢 Our useful channels:\n",
-            "ru": "📢 Наши полезные каналы:\n",
-        }
-        text = header_texts.get(lang, header_texts["uz"])
-        for i, ch in enumerate(channels, 1):
-            text += f"{i}️⃣ {ch['name']}\n"
-            
-        await message.answer("✅ Ro'yxatdan o'tdingiz!", reply_markup=ReplyKeyboardRemove())
-        await message.answer(text, reply_markup=keyboard)
-    else:
-        from src.handlers.menu_handler import get_main_keyboard
-        kbd = await get_main_keyboard()
         await message.answer(
-            t(lang, "registration_done", name=name),
-            reply_markup=kbd,
+            t(lang, "channel_subscribe"),
+            reply_markup=keyboard
         )
+    else:
+        # Kanallar yo'q — to'g'ridan-to'g'ri 6-qadamga o'tish
+        await update_user_channels_joined(user_id, True)
+        await _send_first_transaction_prompt(message, lang)
+
+
+# ═══════════════════════════════════════
+# 5-QADAM: KANAL OBUNASI TEKSHIRISH CALLBACK
+# ═══════════════════════════════════════
+@router.callback_query(lambda c: c.data == "check_sub_onboarding")
+async def check_subscription_onboarding(callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "uz")
+    bot = callback_query.bot
+    
+    channels = await get_all_channels()
+    not_subscribed = []
+    subscribed_channels = []
+    
+    for ch in channels:
+        link = ch["link"]
+        chat_identifier = link
+        if "t.me/" in link and "+" not in link:
+            username = link.split("t.me/")[1].split("/")[0]
+            chat_identifier = f"@{username}"
+        
+        try:
+            member = await bot.get_chat_member(chat_id=chat_identifier, user_id=user_id)
+            if member.status in ["left", "kicked", "restricted"]:
+                not_subscribed.append(ch)
+            else:
+                subscribed_channels.append(ch)
+        except Exception as e:
+            logger.warning(f"Sub check failed for {chat_identifier}: {e}")
+            # Agar tekshirib bo'lmasa, skip qilamiz
+            subscribed_channels.append(ch)
+    
+    if not_subscribed:
+        # "❌ Hali obuna bo'lmadingiz. Iltimos obuna bo'ling 🙏"
+        await callback_query.answer(
+            t(lang, "channel_not_subscribed"),
+            show_alert=True
+        )
+    else:
+        # OBUNA MUVAFFAQIYATLI!
+        from src.database import confirm_channel_subscription
+        for ch in subscribed_channels:
+            await confirm_channel_subscription(user_id, ch["link"])
+            
+        await update_user_channels_joined(user_id, True)
+        await callback_query.message.delete()
+        
+        # "✅ Zo'r! Endi bemalol foydalanishingiz mumkin! 🎉"
+        await callback_query.message.answer(t(lang, "channel_subscribed"))
+        
+        # ════════════════════════════════════════════
+        # 6-QADAM: BIRINCHI TRANZAKSIYA TAKLIFI
+        # ════════════════════════════════════════════
+        await _send_first_transaction_prompt(callback_query.message, lang)
+        await callback_query.answer()
+
+
+async def _send_first_transaction_prompt(message: Message, lang: str):
+    """
+    6-QADAM: Birinchi tranzaksiya taklifi.
+    """
+    from src.handlers.menu_handler import get_main_keyboard
+    kbd = await get_main_keyboard(lang)
+    
+    # "Botga quyidagi xabarni ovozli yoki matn ko'rinishida kiriting:
+    #  💬 'Fastfoodga 40,000, taksiga esa 15,000 so'm sarfladim'
+    #  Shunday oddiy! 😊"
+    await message.answer(
+        t(lang, "first_transaction_prompt"),
+        reply_markup=kbd
+    )
 
 
 # ═══════════════════════════════════════
